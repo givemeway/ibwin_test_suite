@@ -1,0 +1,16 @@
+[
+  {
+    "time": "2026-09-29 07:42:26",
+    "build": "Prod",
+    "release": "[CG-1.7.7] [DEDUP] [RELEASE] [2.0.0.7]",
+    "command": "device-list",
+    "return_code": 5
+  },
+  {
+    "time": "2026-10-01 07:00:44",
+    "build": "Prod",
+    "release": "[CG-1.7.7] [DEDUP] [RELEASE] [2.0.0.7]",
+    "command": "server-version",
+    "return_code": 0
+  }
+]
