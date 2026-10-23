@@ -535,9 +535,12 @@ def mutate_cbt_files(v, files: list[Path], size: int = 1024 * 1024 * 1):  # size
         file_to_copy = (
             input("VMWare File Path: [/home/sandeep/vmware.vmdk] : ")
             or "/home/sandeep/vmware.vmdk"
+            if os.name != "nt"
+            else "F:\\vmware.vmdk"
         )
         for file in files:
             print("Copying file ", file_to_copy, " of size: ", size, "...")
+            print("To.. ", file.parent)
             shutil.copy2(file_to_copy, str(file.parent))
             # create_test_file(file, size)
             print(f"V1: {file.name} : ", info(file))
@@ -673,7 +676,10 @@ def add_split_files_with_session(
         with fl.open(mode, encoding="utf-8") as f:
             if isCBT and v > 1:
                 for split in cbt_splits:
-                    f.writelines(split + ":" + sessionID + "\n")
+                    path = split
+                    if os.name == "nt":
+                        path = str(toPosix(Path(split)))
+                    f.writelines(path + ":" + sessionID + "\n")
             else:
                 for item in split_bkp_set_path.rglob("*"):
                     if (
@@ -684,6 +690,8 @@ def add_split_files_with_session(
                     ):  # Ensure we only add actual files, not subdirectories
                         fname = item.name
                         ori_fpath = split_bkp_set_path.joinpath(fname)
+                        if os.name == "nt":
+                            ori_fpath = toPosix(ori_fpath)
                         f.writelines(str(ori_fpath) + ":" + sessionID + "\n")
     except Exception as e:
         print(e)
@@ -755,8 +763,11 @@ def add_split_files_metadata(
         filename = Path(path).name
         file_dir = Path(path).parent
         xml_path = file_dir.joinpath(filename + "_config.xml")
+        posix_path = str(xml_path)
+        if os.name == "nt":
+            posix_path = toPosix(xml_path)
         config_path = (
-            str(xml_path)
+            posix_path
             + ":"
             + str(value["mdt"])
             + "$"
@@ -768,7 +779,7 @@ def add_split_files_metadata(
         )
         config_paths.append(config_path)
         split_create_config_xml(
-            xml_path, path, split_count, value["mdt"], value["size"]
+            Path(xml_path), path, split_count, value["mdt"], value["size"]
         )
 
     with split_metadata_fl.open("w", encoding="utf-8") as f:
@@ -782,12 +793,14 @@ def create_sync_check_file_list(
     stats = file_path.stat()
     size = int(stats.st_size)
     mdt = int(stats.st_mtime)
-
+    posix_file_path = file_path
+    if os.name == "nt":
+        posix_file_path = toPosix(file_path)
     with fl.open(mode, encoding="utf-8") as f:
         # Filename:MDT$size$split_count
         # /home/ARP/log.txt:1524789612$1073765830$3
         f.write(
-            str(file_path)
+            str(posix_file_path)
             + ":"
             + str(mdt)
             + "$"

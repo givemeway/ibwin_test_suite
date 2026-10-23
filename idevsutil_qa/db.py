@@ -314,6 +314,23 @@ class FileTreeDatabase:
                         ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS versions_trash (
+                    uid         TEXT NOT NULL,
+                    verid       INTEGER NOT NULL CHECK (verid >= 0),
+                    checksum    TEXT NULL,
+                    backuptime  INTEGER NULL,
+
+                    mdt         INTEGER NULL,
+                    parent_id   TEXT NULL,
+                    size        INTEGER NULL CHECK (size >= 0),
+                    isRegularFile INTEGER NOT NULL CHECK (isRegularFile IN(0,1)),
+
+                    PRIMARY KEY (uid, verid)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_versions_trash_uid
+                    ON versions_trash(uid);
+
                 CREATE INDEX IF NOT EXISTS idx_ibtable_parent_id
                     ON ibtable(parent_id);
 
@@ -772,6 +789,31 @@ class FileTreeDatabase:
         ).fetchall()
 
         return [dict(row) for row in rows]
+
+    def _copy_versions_to_trash(self, uid: str) -> None:
+        """
+        Copy the versions of uid and all its descendants into versions_trash.
+        Must run before the ibtable rows are deleted (ON DELETE CASCADE).
+        """
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO versions_trash (
+                uid, verid, checksum, backuptime, mdt, parent_id, size, isRegularFile
+            )
+            WITH RECURSIVE subtree(uid) AS (
+                SELECT uid FROM ibtable WHERE uid = :uid
+                UNION ALL
+                SELECT c.uid
+                FROM ibtable AS c
+                INNER JOIN subtree AS s ON c.parent_id = s.uid
+            )
+            SELECT v.uid, v.verid, v.checksum, v.backuptime, v.mdt,
+                v.parent_id, v.size, v.isRegularFile
+            FROM versions AS v
+            WHERE v.uid IN (SELECT uid FROM subtree)
+            """,
+            {"uid": uid},
+        )
 
     # -----------------------------------------------------------------------
     # Insert
@@ -1286,6 +1328,35 @@ class FileTreeDatabase:
         move_to_trash: bool = False,
     ) -> None:
         """
+        Delete one node and its descendants (ibtable.parent_id cascades).
+
+        If move_to_trash is True, the whole subtree and its version history are
+        copied into trash / versions_trash first. Everything is one transaction:
+        if the copy fails, nothing is deleted.
+        """
+        self._validate_uid(uid)
+
+        with self.conn:
+            if move_to_trash:
+                if not self._copy_subtree_to_trash(uid):
+                    raise RuntimeError(f"Could not copy uid={uid!r} to trash")
+                self._copy_versions_to_trash(uid)
+
+            cursor = self.conn.execute(
+                "DELETE FROM ibtable WHERE uid = ?",
+                (uid,),
+            )
+
+            if cursor.rowcount == 0:
+                raise KeyError(f"No ibtable node exists with uid={uid!r}")
+
+    def delete_old(
+        self,
+        uid: str,
+        *,
+        move_to_trash: bool = False,
+    ) -> None:
+        """
         Delete one node and its descendants.
 
         Because ibtable.parent_id uses ON DELETE CASCADE, deleting a folder
@@ -1330,6 +1401,39 @@ class FileTreeDatabase:
                 raise KeyError(f"No version exists for uid={uid!r}, verid={verid}")
 
     def delete_from_trash(self, uid: str) -> None:
+        """Permanently remove a trashed node, its descendants, and their versions."""
+        self._validate_uid(uid)
+
+        subtree_cte = """
+            WITH RECURSIVE subtree(uid) AS (
+                SELECT uid FROM trash WHERE uid = :uid
+                UNION ALL
+                SELECT c.uid FROM trash AS c
+                INNER JOIN subtree AS s ON c.parent_id = s.uid
+            )
+        """
+
+        with self.conn:
+            if (
+                self.conn.execute(
+                    "SELECT 1 FROM trash WHERE uid = ?", (uid,)
+                ).fetchone()
+                is None
+            ):
+                raise KeyError(f"No trash row exists with uid={uid!r}")
+
+            self.conn.execute(
+                subtree_cte
+                + "DELETE FROM versions_trash WHERE uid IN (SELECT uid FROM subtree)",
+                {"uid": uid},
+            )
+            self.conn.execute(
+                subtree_cte
+                + "DELETE FROM trash WHERE uid IN (SELECT uid FROM subtree)",
+                {"uid": uid},
+            )
+
+    def delete_from_trash_old(self, uid: str) -> None:
         self._validate_uid(uid)
 
         with self.conn:
@@ -1516,6 +1620,122 @@ class FileTreeDatabase:
     # -----------------------------------------------------------------------
     # Trash helpers
     # -----------------------------------------------------------------------
+    #
+
+    def restore_subtree_from_trash(
+        self,
+        uid: str,
+        *,
+        new_parent_id: str | None = None,
+    ) -> int:
+        """
+        Restore a trashed file/folder, ALL its descendants, and their version
+        history into ibtable/versions, then remove them from trash/versions_trash.
+        Atomic: any failure rolls everything back.
+
+        Returns the number of ibtable rows restored.
+        """
+        self._validate_uid(uid)
+
+        top = self.conn.execute(
+            "SELECT uid, parent_id, parent_id_ibtable FROM trash WHERE uid = ?",
+            (uid,),
+        ).fetchone()
+
+        if top is None:
+            raise KeyError(f"No trash row exists with uid={uid!r}")
+
+        if top["parent_id"] is not None and new_parent_id is None:
+            raise ValueError(
+                "This node is inside a trashed folder; restore the top-most trashed "
+                "folder, or pass new_parent_id to restore this node on its own."
+            )
+
+        target_parent = (
+            new_parent_id if new_parent_id is not None else top["parent_id_ibtable"]
+        )
+
+        if target_parent is not None:
+            exists = self.conn.execute(
+                "SELECT 1 FROM ibtable WHERE uid = ?", (target_parent,)
+            ).fetchone()
+            if exists is None:
+                raise ValueError(
+                    f"Parent {target_parent!r} no longer exists in ibtable; "
+                    "pass new_parent_id to choose another location."
+                )
+
+        subtree_cte = """
+            WITH RECURSIVE subtree AS (
+                SELECT uid, parent_id, is_folder, name, mdt, save_time, label,
+                    size, vernum, checksum, backuptime, device_id, computer_id,
+                    isRegularFile, 0 AS depth
+                FROM trash
+                WHERE uid = :uid
+
+                UNION ALL
+
+                SELECT c.uid, c.parent_id, c.is_folder, c.name, c.mdt, c.save_time,
+                    c.label, c.size, c.vernum, c.checksum, c.backuptime,
+                    c.device_id, c.computer_id, c.isRegularFile, s.depth + 1
+                FROM trash AS c
+                INNER JOIN subtree AS s ON c.parent_id = s.uid
+            )
+        """
+
+        with self.conn:
+            # 1. nodes back into ibtable
+            cursor = self.conn.execute(
+                subtree_cte
+                + """
+                INSERT INTO ibtable (
+                    uid, parent_id, is_folder, name, mdt, save_time, label,
+                    size, vernum, checksum, backuptime, device_id, computer_id,
+                    isRegularFile
+                )
+                SELECT
+                    uid,
+                    CASE WHEN depth = 0 THEN :new_parent ELSE parent_id END,
+                    is_folder, name, mdt, save_time, label,
+                    size, vernum, checksum, backuptime, device_id, computer_id,
+                    isRegularFile
+
+                FROM subtree
+                ORDER BY depth
+                """,
+                {"uid": uid, "new_parent": target_parent},
+            )
+            restored = cursor.rowcount
+
+            # 2. version history back into versions (ibtable rows exist now, so the FK holds)
+            self.conn.execute(
+                subtree_cte
+                + """
+                INSERT INTO versions (
+                    uid, verid, checksum, backuptime, mdt, parent_id, size, isRegularFile
+                )
+                SELECT uid, verid, checksum, backuptime, mdt, parent_id, size, isRegularFile
+                FROM versions_trash
+                WHERE uid IN (SELECT uid FROM subtree)
+                """,
+                {"uid": uid},
+            )
+
+            # 3. clear versions_trash for this subtree
+            self.conn.execute(
+                subtree_cte
+                + "DELETE FROM versions_trash WHERE uid IN (SELECT uid FROM subtree)",
+                {"uid": uid},
+            )
+
+            # 4. clear trash last (the CTE above needs it intact)
+            self.conn.execute(
+                subtree_cte
+                + "DELETE FROM trash WHERE uid IN (SELECT uid FROM subtree)",
+                {"uid": uid},
+            )
+
+        return restored
 
     def _copy_subtree_to_trash(self, uid: str) -> bool:
         """

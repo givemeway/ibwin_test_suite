@@ -727,57 +727,57 @@ class Regression:
         meta = PathMetadata()
 
         # 1. CBT Backup
-        # origin_files_to_split = {}
-        #
-        # for v in range(1, TOTAL_VERSIONS + 1):
-        #     cbt_info = mutate_cbt_files(v=v, files=cbt_files, size=1024 * 1024 * 1)
-        #     out = self.cbt_backup(v, files=cbt_files, cbt_info=cbt_info)
-        #
-        #     origin_files_to_split = out["origin_files_to_split"]
-        #
-        #     ordered_file_paths = out["ordered_file_paths"]
-        #
-        #     for file in ordered_file_paths:
-        #         self.update_versioned_files_in_db(
-        #             v, meta, file, deviceID, compID, is_Regular_file=0
-        #         )
-        #
-        # # 2. CBT - Restore and validate restores
-        # stats = {}
-        #
-        # for v in range(1, TOTAL_VERSIONS + 1):
-        #     batch_stat = self.split_restore(
-        #         original_files=origin_files_to_split, v=v, split_count=2, isCBT=True
-        #     )
-        #     for k, v in batch_stat.items():
-        #         if k in stats:
-        #             stats[k].append(v)
-        #         else:
-        #             stats[k] = [v]
-        #
-        # # 2 a) verify cbt file versions
-        #
-        # for path in origin_files_to_split.keys():
-        #     file = Path(path)
-        #     r = self.tool.version_info(True, rp=file, isRegularFile=0)
-        #     if r is None:
-        #         return
-        #     isVerified = self.validate_versions(
-        #         out=r["stdout"],
-        #         remotepath=str(file),
-        #         uploadedStats=stats,
-        #         isRegularFile=0,
-        #         isCBT=True,
-        #     )
-        #     self.add(
-        #         "CBT-VERSIONS",
-        #         "Retrieve & Verify version history of CBT files",
-        #         "PASS" if isVerified else "FAIL",
-        #         f"Version-info of {file.name} succeeds",
-        #         str(r["return_code"]),
-        #         r["stderr"],
-        #         f"Build: {self.tool.build.name}",
-        #     )
+        origin_files_to_split = {}
+
+        for v in range(1, TOTAL_VERSIONS + 1):
+            cbt_info = mutate_cbt_files(v=v, files=cbt_files, size=1024 * 1024 * 1)
+            out = self.cbt_backup(v, files=cbt_files, cbt_info=cbt_info)
+
+            origin_files_to_split = out["origin_files_to_split"]
+
+            ordered_file_paths = out["ordered_file_paths"]
+
+            for file in ordered_file_paths:
+                self.update_versioned_files_in_db(
+                    v, meta, file, deviceID, compID, is_Regular_file=0
+                )
+
+        # 2. CBT - Restore and validate restores
+        stats = {}
+
+        for v in range(1, TOTAL_VERSIONS + 1):
+            batch_stat = self.split_restore(
+                original_files=origin_files_to_split, v=v, split_count=2, isCBT=True
+            )
+            for k, v in batch_stat.items():
+                if k in stats:
+                    stats[k].append(v)
+                else:
+                    stats[k] = [v]
+
+        # 2 a) verify cbt file versions
+
+        for path in origin_files_to_split.keys():
+            file = Path(path)
+            r = self.tool.version_info(True, rp=file, isRegularFile=0)
+            if r is None:
+                return
+            isVerified = self.validate_versions(
+                out=r["stdout"],
+                remotepath=str(file),
+                uploadedStats=stats,
+                isRegularFile=0,
+                isCBT=True,
+            )
+            self.add(
+                "CBT-VERSIONS",
+                "Retrieve & Verify version history of CBT files",
+                "PASS" if isVerified else "FAIL",
+                f"Version-info of {file.name} succeeds",
+                str(r["return_code"]),
+                r["stderr"],
+                f"Build: {self.tool.build.name}",
+            )
 
         # 3. Split Backup
         origin_files_to_split = {}
@@ -992,7 +992,10 @@ class Regression:
 
         with fl.open("w", encoding="utf-8") as f:
             for match in matched_splits:
-                f.writelines(match + ":" + session + "\n")
+                path = match
+                if os.name == "nt":
+                    path = str(toPosix(Path(path)))
+                f.writelines(path + ":" + session + "\n")
 
         return cbt_splits
 

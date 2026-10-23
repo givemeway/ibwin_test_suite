@@ -48,13 +48,13 @@ def parse_args():
     if os.name == "nt":
         parser.add_argument(
             "--workspace",
-            default="F:/QA/QA-21-10-2026",
+            default="F:/QA/QA-22-10-2026",
             help="Local workspace directory.",
         )
     else:
         parser.add_argument(
             "--workspace",
-            default="/home/sandeep/QA/TLS-Tunnel-22-10-2026",
+            default="/home/sandeep/QA/TLS-Tunnel-23-10-2026",
             help="Local workspace directory.",
         )
 

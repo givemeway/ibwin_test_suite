@@ -647,6 +647,8 @@ class SearchSuite:
             print("File is the Choice")
             toDelete = rng.choice(files_only)
 
+        return toDelete
+
     def move_to_original(self, to_move: list[str], v: int):
         fl: Path = self.run_dir / "MTO_list.txt"
         with fl.open("w", encoding="utf-8") as f:
@@ -656,7 +658,61 @@ class SearchSuite:
             isSuiteRunning=True, filelist=str(fl), name=f"move_to_original_{v}"
         )
         if r is not None:
-            details = r["stdout"]
+            details = r.get("stdout", "").strip()  # if details == "" else details
+
+            itemsDeletedWithServerRoot = self._extract_fname(details)
+            itemsDeletedWithoutServerRoot: set[str] = set()
+            for path in to_move:
+                movedItem = self.db.get_by_path_new(path=path, isRegularFile=1)
+                self.db.restore_subtree_from_trash(uid=movedItem["uid"])
+
+            trash_items = self.db.get_all(table="trash")
+
+            for item in trash_items:
+                path = self.db.get_path_by_uid(
+                    item["uid"],
+                    table="trash",
+                    parent_id_ibtable=item["parent_id_ibtable"],
+                )
+
+                if path is not None:
+                    if not bool(item["is_folder"]):
+                        path = path.rstrip("/")
+                    itemsSupposedToBeDeleted.add(path)
+
+            if int(self.tool.env.dedup) == 1:
+                for item in itemsDeletedWithServerRoot:
+                    parts = item.split("/")[2:]
+                    p = "/" + "/".join(parts)
+                    itemsDeletedWithoutServerRoot.add(p)
+
+            itemsToCompare = (
+                itemsDeletedWithoutServerRoot
+                if int(self.tool.env.dedup) == 1
+                else itemsDeletedWithServerRoot
+            )
+
+            for item in itemsSupposedToBeDeleted:
+                try:
+                    itemsToCompare.remove(item)
+                except:
+                    print("Key Not found: ", item)
+
+            result = {
+                "expected": len(itemsSupposedToBeDeleted),
+                "passed": False,
+                "actual": len(itemsDeletedWithServerRoot),
+            }
+
+            if len(itemsToCompare) == 0:
+                result["passed"] = True
+
+            test_id = f"SEARCH-{v:03d}"
+            description = "Delete Item"
+
+            self._record(
+                test_id=test_id, description=description, result=result, details=details
+            )
 
     def validate_search(self, itemsToMatch: set, itemsFoundInSearch: set) -> dict:
         _set = itemsToMatch

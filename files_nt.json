@@ -21,5 +21,19 @@
     "\\TEST^\\file1^.txt",
     "\\TEST_\\file1_.txt",
     "\\TEST{\\file1{.txt"
-  ]
+  ],
+  "split_files": [
+    "file1#.txt",
+    "file1$.txt",
+    "file1%.txt",
+    "file1_'.txt",
+    "file1(.txt",
+    "file1).txt",
+    "file1*.txt",
+    "file11.txt",
+    "file1?.txt",
+    "file1@.txt",
+    "file1[.txt"
+  ],
+  "cbt_files": ["vmware.vmdk"]
 }

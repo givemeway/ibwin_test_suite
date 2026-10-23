@@ -8,7 +8,7 @@
     "osname": "nt",
     "hostname": "Sandeep-Laptop",
     "working_dir": "C:\\Users\\Sandeep Kumar\\Desktop\\cmd_sdutil",
-    "isTestBed": 0,
+    "isTestBed": 1,
     "oppositeBuild": "2"
   },
   "2": {
@@ -228,7 +228,7 @@
     "oppositeBuild": "4"
   },
 
-"20": {
+  "20": {
     "name": "Prod",
     "executable": "idevsutil",
     "release": "[CG-1.7.7] [DEDUP] [RELEASE] [2.0.0.7]",
@@ -240,7 +240,7 @@
     "isTestBed": 1,
     "oppositeBuild": "4"
   },
-"21": {
+  "21": {
     "name": "Test",
     "executable": "idevsutil",
     "release": "[CYGWIN-3.1.7] [SYNC-DEDUP] [RELEASE] [1.0.0.0]",
@@ -252,11 +252,11 @@
     "isTestBed": 1,
     "oppositeBuild": "4"
   },
-"22": {
+  "22": {
     "name": "Prod",
     "executable": "idevsutil",
     "release": "[CYGWIN-3.1.7] [SYNC-DEDUP] [RELEASE] [1.0.0.0]",
-    "release_date": "[30/JUNE/2026]", 
+    "release_date": "[30/JUNE/2026]",
     "selection": "22",
     "osname": "posix",
     "hostname": "Linux-Test-Machine",
@@ -276,7 +276,7 @@
     "isTestBed": 1,
     "oppositeBuild": "4"
   },
-"24": {
+  "24": {
     "name": "Test",
     "executable": "idevsutil",
     "release": "[CG-1.7.7] [DEDUP] [RELEASE] [2.0.0.7]",
