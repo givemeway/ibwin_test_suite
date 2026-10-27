@@ -267,6 +267,7 @@ class Result:
     actual: str
     build: str
     details: str = ""
+    duration: str = ""
 
 
 @dataclass

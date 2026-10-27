@@ -33,16 +33,25 @@ def copy_tmp_dump(root: Path, userRoot: Path, username: str):
             print(f"Copied: {txt_file.name}")
 
 
+def log_to_file(log_file, message: str):
+    with open(log_file, "a") as f:
+        f.write(message + "\n")
+
+
 def compare_dicts_and_format(
-    dict_one, dict_two, separator="27α/ß20", repo_link_flag: int = 0
+    dict_one, dict_two, separator="27α/ß20", repo_link_flag: int = 0, version: int = 1
 ):
     # dict_one = { path: {checksum: checksum,checksumpath: checksumpath} }
     # dict_two = { checksum: [paths] }
     result_list = []
     no_link_list = []
+    log_to_file("dict_two.log", f"{dict_two}")
+    log_to_file("dict_one.log", f"{dict_one}")
     for val in dict_one.values():
         checksum = val["checksum"].strip()
         checksumpath = val["checksumpath"]
+        log_to_file("dicts.log", f"checksum: {checksum}")
+        log_to_file("dicts.log", f"checksumpath: {checksumpath}")
         if checksum in dict_two:
             value: list[str] | dict[str, Any] = dict_two[checksum]
             formatted_line: str = ""
@@ -61,7 +70,7 @@ def compare_dicts_and_format(
 
                 if isinstance(value[0], str):
                     link_path = value[0]
-                    ver = 1
+                    ver = version
                     repo_no = "NA"
                     repo_flag = repo_link_flag
 
@@ -195,10 +204,13 @@ def create_file_dict(
 ):
     link_chk_file_list = []
     print("Creating Link file set ...")
+    log_to_file("details2.log", output)
 
     if not fromFile and output != "":
         link_chk_file_list = [
-            line.strip() for line in output.splitlines() if line.strip()
+            line.strip()
+            for line in output.splitlines()
+            if line.strip() != "DES keylen=8 ivlen=8 EVP_BytesToKey result=8"
         ]
     if fromFile and output == "":
         with chk_file_list_path.open("r", encoding="utf-8") as f:
@@ -235,10 +247,13 @@ def create_checksum_dict(
     file_list_path: Path = Path("/"),
 ) -> dict[str, Any]:
     print("Creating source file set...")
+    log_to_file("output.log", output)
     source_chk_file_list = []
     if not fromFile and output != "":
         source_chk_file_list = [
-            line.strip() for line in output.splitlines() if line.strip()
+            line.strip()
+            for line in output.splitlines()
+            if line.strip() != "DES keylen=8 ivlen=8 EVP_BytesToKey result=8"
         ]
     elif fromFile and output == "":
         with Path(chk_file_list_path).open("r", encoding="utf-8") as f:
@@ -301,7 +316,8 @@ def get_all_files_from_list(
     return final_files_array
 
 
-def create_arg_file(args: List[str], argFilePath: Path) -> None:
+def create_arg_file(args: list[str], argFilePath: Path) -> None:
+    print("args to be written: ", args)
     with argFilePath.open("w", encoding="utf8") as f:
         for arg in args:
             f.write(f"{arg}\n")
@@ -441,7 +457,10 @@ def toPosix(path: Path) -> str:
 
 
 def toWin(path: str) -> Path:
-    parts = path.split("\\")[1:]
+    idx = 1
+    if not path.startswith("\\"):
+        idx = 0
+    parts = path.split("\\")[idx:]
     file = parts[0] + ":" + "\\" + "\\".join(parts[1:])
     return Path(file)
 
@@ -722,7 +741,10 @@ def split_restore_create_config_xml_file(
     with fl.open("w", encoding="utf-8") as f:
         for file in split_bkp_set_path.rglob("*_config.xml"):
             if file.is_file():
-                f.writelines(str(file) + version + "\n")
+                p = str(file)
+                if os.name == "nt":
+                    p = toPosix(file)
+                f.writelines(p + version + "\n")
 
 
 def split_restore_create_split_restore_file(
@@ -901,22 +923,27 @@ def split_file(file_path: str, split_count: int, fl_path: str, mode: str = "w"):
     # print(f"Splitting '{file_name}' ({file_size} bytes) into {split_count} pieces...")
 
     try:
-        stats = Path(file_path).stat()
-        size = int(stats.st_size)
-        mdt = int(stats.st_mtime)
-        with Path(fl_path).open(mode, encoding="utf-8") as f:
-            # Filename:MDT$size$split_count
-            # /home/ARP/log.txt:1524789612$1073765830$3
-            f.write(
-                file_path
-                + ":"
-                + str(mdt)
-                + "$"
-                + str(size)
-                + "$"
-                + str(split_count)
-                + "\n"
-            )
+        stats = create_sync_check_file_list(
+            Path(file_path), mode=mode, split_count=split_count, fl=Path(fl_path)
+        )
+        mdt = stats["mdt"]
+        size = stats["size"]
+        # stats = Path(file_path).stat()
+        # size = int(stats.st_size)
+        # mdt = int(stats.st_mtime)
+        # with Path(fl_path).open(mode, encoding="utf-8") as f:
+        #     # Filename:MDT$size$split_count
+        #     # /home/ARP/log.txt:1524789612$1073765830$3
+        #     f.write(
+        #         file_path
+        #         + ":"
+        #         + str(mdt)
+        #         + "$"
+        #         + str(size)
+        #         + "$"
+        #         + str(split_count)
+        #         + "\n"
+        #     )
         with open(file_path, "rb") as f_in:
             splits_info = []
             for i in range(split_count):

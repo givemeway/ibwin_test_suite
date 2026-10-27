@@ -154,6 +154,7 @@ def generate_files_new(
     except Exception as e:
         print("\n [Error]: ", e)
 
+
 def generate_files_safe(
     num_files=10000,
     output_dir="generated_files_safe",
@@ -174,7 +175,9 @@ def generate_files_safe(
 
         if levels > 0 and num_subfolders > 0:
             for lvl in range(1, levels + 1):
-                combinations = itertools.product(range(1, num_subfolders + 1), repeat=lvl)
+                combinations = itertools.product(
+                    range(1, num_subfolders + 1), repeat=lvl
+                )
                 for combo in combinations:
                     path_parts = [output_dir] + [f"folder_{i:02d}" for i in combo]
                     target_dirs.append(os.path.join(*path_parts))
@@ -203,10 +206,8 @@ def generate_files_safe(
             for _ in range(current_dir_files):
                 file_count += 1
                 file_path = os.path.join(d, f"file_{file_count:05d}.bin")
-                
                 # Random size between min and max
                 file_size = random.randint(min_bytes, max_bytes)
-                
                 # Slice from the pre-generated buffer instead of calling token_bytes repeatedly
                 with open(file_path, "wb") as f:
                     f.write(master_buffer[:file_size])
@@ -219,8 +220,9 @@ def generate_files_safe(
     except Exception as e:
         print("\n[Error]:", e)
 
+
 if __name__ == "__main__":
-    random.seed(12345)
+    # random.seed(12345)
     try:
         creation_path = input("Creation Path : ").strip()
         total_files = int(input("No of files to create: ").strip())

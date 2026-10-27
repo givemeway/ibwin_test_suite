@@ -42,6 +42,7 @@ class SearchSuite:
         description: str,
         result: dict,
         details: str,
+        duration: str = "",
     ) -> bool:
         """Convert an idevsutil execution result into a QA PASS/FAIL."""
         passed = result.get("passed", False)
@@ -57,6 +58,7 @@ class SearchSuite:
                 status=status,
                 build=f"{self.tool.build.name} - {self.tool.build.release}",
                 details=details,
+                duration=duration,
             )
         )
         print(f"[{status}] {test_id} - {description}")
@@ -176,7 +178,11 @@ class SearchSuite:
             description = "Delete Item"
 
             self._record(
-                test_id=test_id, description=description, result=result, details=details
+                test_id=test_id,
+                description=description,
+                result=result,
+                details=details,
+                duration=out["duration"],
             )
 
         return itemsSupposedToBeDeleted
@@ -226,7 +232,13 @@ class SearchSuite:
                 itemsToMatch.add(path.rstrip("/"))
 
         result = self.validate_search(itemsToMatch, itemsFoundInSearch)
-        self._record(test_id=test_id, description=name, result=result, details=details)
+        self._record(
+            test_id=test_id,
+            description=name,
+            result=result,
+            details=details,
+            duration=out["duration"],
+        )
 
     def search_simple(
         self,
@@ -317,7 +329,13 @@ class SearchSuite:
                     itemsToMatch.add(path.rstrip("/"))
 
         result = self.validate_search(itemsToMatch, itemsFoundInSearch)
-        self._record(test_id=test_id, description=name, result=result, details=details)
+        self._record(
+            test_id=test_id,
+            description=name,
+            result=result,
+            details=details,
+            duration=out["duration"],
+        )
 
         return details
 
@@ -350,7 +368,11 @@ class SearchSuite:
         test_id = f"SEARCH-{v:03d}"
         description = "Search Trash"
         self._record(
-            test_id=test_id, description=description, result=result, details=details
+            test_id=test_id,
+            description=description,
+            result=result,
+            details=details,
+            duration=out["duration"],
         )
 
     def search_all(
@@ -518,7 +540,11 @@ class SearchSuite:
         test_id = f"SEARCH-{v:03d}"
         description = "Search Trash"
         self._record(
-            test_id=test_id, description=description, result=result, details=details
+            test_id=test_id,
+            description=description,
+            result=result,
+            details=details,
+            duration=out["duration"],
         )
 
     def search_lorder_torder(self):
@@ -711,7 +737,11 @@ class SearchSuite:
             description = "Delete Item"
 
             self._record(
-                test_id=test_id, description=description, result=result, details=details
+                test_id=test_id,
+                description=description,
+                result=result,
+                details=details,
+                duration=r["duration"],
             )
 
     def validate_search(self, itemsToMatch: set, itemsFoundInSearch: set) -> dict:
@@ -793,6 +823,7 @@ class SearchSuite:
                     "actual",
                     "build",
                     "details",
+                    "duration",
                 ],
             )
             writer.writeheader()

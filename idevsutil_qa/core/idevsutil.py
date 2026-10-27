@@ -94,7 +94,6 @@ class IdevsUtil:
         utf_arg.append(str(enc_exe))
         utf_arg.append(str(argFilePath))
         utf_arg.append("1")
-
         enc_psd: str = ""
         enc_pk: str = ""
         enc_cmd: str = ""
@@ -105,7 +104,6 @@ class IdevsUtil:
             cred_args.append(f"--string-encode={self.env.private_key}")
         else:
             cred_args.append(f"--string-encode={self.env.password}")
-
         try:
             p = subprocess.run(
                 cred_args,
@@ -174,7 +172,6 @@ class IdevsUtil:
                 print("\n--- STDERR ---")
                 print(err)
                 return
-            print("Encrypted ARGS: ", enc_str)
             create_enc_file(enc_str, argFilePath)
             create_utf8_file(utf8FilePath, str(argFilePath))
 
@@ -189,7 +186,6 @@ class IdevsUtil:
         utf_arg.append(str(enc_exe))
         utf_arg.append(str(utf8FilePath))
         utf_arg.append("1")
-
         try:
             p = subprocess.run(
                 utf_arg,
@@ -220,7 +216,7 @@ class IdevsUtil:
         args,
         name="command",
         isBuildSame: bool = True,
-    ) -> Dict[str, str, str, str]:
+    ) -> dict[str, str] | None:
         cmd: List[str] | None = []
 
         if name != "sys_cmds":
@@ -258,58 +254,62 @@ class IdevsUtil:
                 and not bool(self.env.syncDedup)
             ):
                 cmd.append(f"--device-id={self.env.device_id}")
+
+            cmd.append("--tls")
+
+            print("\n" + "=" * 90)
+            print(f"BUILD   : {self.build.name} / {self.build.release}")
+            print(f"COMMAND : {command_line(cmd)}")
+            print("=" * 90)
+
+            if self.env.use_utf8_encryption:
+                cmd = self.convert_to_utf8_enc_cmd(args, executable)
+
+            start = time.perf_counter()
+            if isinstance(cmd, List):
+                try:
+                    p = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=self.env.timeout,
+                    )
+                    rc, out, err = p.returncode, p.stdout, p.stderr
+                except subprocess.TimeoutExpired as e:
+                    rc, out, err = (
+                        -1,
+                        e.stdout or "",
+                        f"TIMEOUT after {self.env.timeout}s",
+                    )
+                except Exception as e:
+                    rc, out, err = -1, "", str(e)
+
+                elapsed = time.perf_counter() - start
+                (self.logs / f"{name}.stdout.txt").write_text(
+                    out, encoding="utf-8", errors="replace"
+                )
+                (self.logs / f"{name}.stderr.txt").write_text(
+                    err, encoding="utf-8", errors="replace"
+                )
+
+                if err:
+                    print("\n--- STDERR ---")
+                    print(err)
+                print(f"\nReturn code: {rc} | Duration: {elapsed:.2f}s")
+
+                # if not self.isRegression:
+                # print(out)
+                # input("Press ENTER to continue..")
+                return {
+                    "return_code": rc,
+                    "stdout": out,
+                    "stderr": err,
+                    "duration": elapsed,
+                }
         else:
             cmd.extend(args)
-
-        cmd.append("--tls")
-
-        print("\n" + "=" * 90)
-        print(f"BUILD   : {self.build.name} / {self.build.release}")
-        print(f"COMMAND : {command_line(cmd)}")
-        print("=" * 90)
-
-        if self.env.use_utf8_encryption:
-            cmd = self.convert_to_utf8_enc_cmd(args, executable)
-
-        start = time.perf_counter()
-        if isinstance(cmd, List):
-            try:
-                p = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=self.env.timeout,
-                )
-                rc, out, err = p.returncode, p.stdout, p.stderr
-            except subprocess.TimeoutExpired as e:
-                rc, out, err = -1, e.stdout or "", f"TIMEOUT after {self.env.timeout}s"
-            except Exception as e:
-                rc, out, err = -1, "", str(e)
-
-            elapsed = time.perf_counter() - start
-            (self.logs / f"{name}.stdout.txt").write_text(
-                out, encoding="utf-8", errors="replace"
-            )
-            (self.logs / f"{name}.stderr.txt").write_text(
-                err, encoding="utf-8", errors="replace"
-            )
-
-            if err:
-                print("\n--- STDERR ---")
-                print(err)
-            print(f"\nReturn code: {rc} | Duration: {elapsed:.2f}s")
-
-            # if not self.isRegression:
-            # print(out)
-            # input("Press ENTER to continue..")
-            return {
-                "return_code": rc,
-                "stdout": out,
-                "stderr": err,
-                "duration": elapsed,
-            }
 
     def clear_screen(self):
         cmd = "cls" if os.name == "nt" else "clear"
@@ -1029,22 +1029,20 @@ class IdevsUtil:
     ):
         a: List[str] = []
         poisx_path: str
+        a.append("--xml-output")
         if os.name == "nt":
             poisx_path = Path(destination).as_posix()
             parts = poisx_path.split(":")
-            poisx_path = "/" + "".join(parts)
+            poisx_path = "/" + "".join(parts) + "/"
+            a.append("--add-progress")
 
         else:
             poisx_path = str(destination)
 
-        a.append("--xml-output")
         a.append(f"--files-from={file_list}")
         a.append(self.remote())
         a.append(poisx_path)
         if isSuiteRunning and len(filesToDownload) > 0:
-            print("#" * 90)
-            print("SANITY-RESTORE")
-            print("#" * 90)
             self.run(a, name, isBuildSame)
             filesUploaded = []
             for filename in filesToDownload:
@@ -1096,11 +1094,14 @@ class IdevsUtil:
             name="create_chk_source",
         )
 
-        details = out.get("stderr", "").strip()
-        details = out.get("stdout", "").strip() if details == "" else details
+        # details = out.get("stderr", "").strip()
+        details = out.get("stdout", "").strip()  # if details == "" else details
 
         with Path(fl_with_file_chks).open("w", encoding="utf-8") as f:
-            f.writelines(details)
+            chk_files = [line.strip() for line in details.splitlines() if line.strip()]
+            for chk_file in chk_files:
+                if chk_file != "DES keylen=8 ivlen=8 EVP_BytesToKey result=8":
+                    f.writelines(chk_file + "\n")
 
         r = self.upload(
             isSuiteRunning=True,
@@ -1139,11 +1140,14 @@ class IdevsUtil:
             name="create_chk_link_files",
         )
 
-        details2 = out2.get("stderr", "").strip()
-        details2 = out2.get("stdout", "").strip() if details2 == "" else details2
+        # details2 = out2.get("stderr", "").strip()
+        details2 = out2.get("stdout", "").strip()  # if details2 == "" else details2
 
         with Path(fl_with_file_chks_link).open("w", encoding="utf-8") as f:
-            f.writelines(details2)
+            chk_files = [line.strip() for line in details2.splitlines() if line.strip()]
+            for chk_file in chk_files:
+                if chk_file != "DES keylen=8 ivlen=8 EVP_BytesToKey result=8":
+                    f.writelines(chk_file + "\n")
 
         source_dict = create_checksum_dict(
             fromFile=False, output=details, file_list_path=Path(fl_with_all_file_paths)
@@ -1157,7 +1161,9 @@ class IdevsUtil:
 
         print("Comparing LINK and SOURCE DICTS...")
 
-        _dict = compare_dicts_and_format(link_dict, source_dict, repo_link_flag=0)
+        _dict = compare_dicts_and_format(
+            link_dict, source_dict, repo_link_flag=0, version=3
+        )
         formatted = _dict["link"]
         unlink = _dict["nolink"]
         print("linked: ", len(formatted))
@@ -1293,18 +1299,19 @@ class IdevsUtil:
         args = ["--xml-output", "--search", "--dedup-search2", self.remote()]
 
         out = self.run(args, name="dedup_search2")
-        details = out.get("stderr", "").strip()
-        details = out.get("stdout", "").strip() if details == "" else details
+        # details = out.get("stderr", "").strip()
+        details = out.get("stdout", "").strip()  # if details == "" else details
 
         dedup_checksum_dict = extract_repo_info(details)
         repo_link_flag = 1
+
         if not dedup_checksum_dict:
             print("Repo Links not found Trying with dedup-Search3 ")
             repo_link_flag = 0
             args = ["--xml-output", "--search", "--dedup-search3", self.remote()]
             out = self.run(args, name="dedup_search3")
-            details = out.get("stderr", "").strip()
-            details = out.get("stdout", "").strip() if details == "" else details
+            # details = out.get("stderr", "").strip()
+            details = out.get("stdout", "").strip()  # if details == "" else details
             dedup_checksum_dict = extract_repo_info(details)
 
         all_files = get_all_files_from_list(self.env.fileListPath)
@@ -1328,11 +1335,17 @@ class IdevsUtil:
             name="create_chk_source",
         )
 
-        details = out.get("stderr", "").strip()
-        details = out.get("stdout", "").strip() if details == "" else details
+        # details = out.get("stderr", "").strip()
+        details = out.get("stdout", "").strip()  # if details == "" else details
 
         with Path(fl_with_file_chks).open("w", encoding="utf-8") as f:
-            f.writelines(details)
+            chk_files = [
+                line.strip()
+                for line in details.splitlines()
+                if line.strip() != "DES keylen=8 ivlen=8 EVP_BytesToKey result=8"
+            ]
+            for chk_file in chk_files:
+                f.writelines(chk_file + "\n")
 
         source_checksum_dict = create_file_dict(
             fromFile=False, output=details, file_list_path=Path(fl_with_all_file_paths)

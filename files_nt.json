@@ -29,9 +29,7 @@
     "file1_'.txt",
     "file1(.txt",
     "file1).txt",
-    "file1*.txt",
     "file11.txt",
-    "file1?.txt",
     "file1@.txt",
     "file1[.txt"
   ],

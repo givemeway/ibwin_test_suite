@@ -1,7 +1,7 @@
 {
   "1": {
     "name": "Prod",
-    "executable": "\\idwutil_600.exe",
+    "executable": "\\idevsutil.exe",
     "release": "[CG-3.1.7] [DEDUP] [RELEASE] [2.0.0.7]",
     "release_date": "[31/AUG/2026]",
     "selection": "1",
