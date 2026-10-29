@@ -45,7 +45,8 @@ from ..utils import (
 SPLIT_SIZE = 1024 * 1024 * 512
 BLOCK_SIZE = 1024 * 32
 BLOCKS_IN_SPLIT = SPLIT_SIZE // BLOCK_SIZE
-TOTAL_VERSIONS = 1
+TOTAL_VERSIONS = 5
+SPLIT_COUNT = 7
 
 
 class Regression:
@@ -107,7 +108,7 @@ class Regression:
         self.split_bkp_syntax_path = "/home/sandeep/split_filelist.txt"
         self.split_rs_path = "/home/sandeep/split_restore"
 
-    def add(self, tid, desc, status, expected, actual, build, duration, details=""):
+    def add(self, tid, desc, status, expected, actual, build, details="", duration=""):
         self.results.append(
             Result(
                 tid, desc, status, expected, actual, build, details, duration=duration
@@ -239,7 +240,15 @@ class Regression:
 
                 if not Path.exists(snapshot):
                     snapshot.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(file, filePath)
+                info_path = str(filePath) + "_info"
+                info_path = Path(info_path)
+                stat = info(file)
+                with info_path.open("w", encoding="utf-8") as f:
+                    f.write("size=" + str(stat["size"]) + "\n")
+                    f.write("mdt=" + str(int(stat["mdt"])) + "\n")
+                    f.write("ver=" + str(v) + "\n")
+                    f.write("checksum=" + stat["sha256"] + "\n")
+                # shutil.copy2(file, filePath)
 
         except Exception as e:
             print("_copy_snapshot: ", e)
@@ -257,10 +266,13 @@ class Regression:
         )
         if r is None:
             return False
+
+        tc_name = "REGULAR-FILE-BACKUP"
+        desc = f"{'Incremental' if v > 1 else 'FULL'} - backup -  IBVER{v:03d}"
         if r["return_code"] != 0:
             self.add(
-                f"{'INC' if v > 1 else 'FULL'}-BKP-{v:03d}",
-                f"{'Incremental' if v > 1 else 'FULL'} - backup V{v}",
+                tc_name,
+                desc,
                 "FAIL",
                 "Return code 0",
                 str(r["return_code"]),
@@ -275,8 +287,8 @@ class Regression:
         )
 
         self.add(
-            f"{'INC' if v > 1 else 'FULL'}-BKP-{v:03d}",
-            f"{'Incremental' if v > 1 else 'FULL'} - backup V{v}",
+            tc_name,
+            desc,
             "PASS",
             "Backup succeeded",
             f"Return code 0; {r['duration']:.2f}s",
@@ -356,17 +368,25 @@ class Regression:
                 parts = Path(p).as_posix().split("/")
                 p = "/".join(parts[1:])
 
-            stat = {
-                "mdt": file.stat().st_mtime,
-                "size": file.stat().st_size,
-                "ver": v,
-            }
+            info_p = str(file) + "_info"
+            info_path = Path(info_p)
+            stat = {}
+            with info_path.open("r", encoding="utf-8") as f:
+                data = f.read()
+                lines = [line.strip() for line in data.splitlines() if line.strip()]
+                for line in lines:
+                    parts = line.split("=")
+                    key = parts[0]
+                    val = parts[1]
+                    stat[key] = val
+                    if key == "size" or key == "mdt" or key == "ver":
+                        val = int(val)
             stats[p] = stat
             if str(path) in files_dict:
-                files_dict[str(path)].append(file)
+                files_dict[str(path)].append(stat)
             else:
                 files_dict[str(path)] = []
-                files_dict[str(path)].append(file)
+                files_dict[str(path)].append(stat)
 
         for rf in restored:
             parent = rf.parent
@@ -389,7 +409,7 @@ class Regression:
                 files_dict[key] = []
                 files_dict[key].append(rf)
 
-        print("files_dict: ", files_dict.values())
+        match_count = 0
         for val in files_dict.values():
             try:
                 expected = val[0]
@@ -397,37 +417,44 @@ class Regression:
                 if os.name == "nt":
                     expected_parts = str(expected).split(":")
                     actual_parts = str(actual).split(":")
-                    if len(expected_parts) > 1:
+                    if len(expected_parts) == 1:
                         expected = toWin(str(expected))
-                    if len(actual_parts) > 1:
+                    if len(actual_parts) == 1:
                         actual = toWin(str(actual))
                 # if os.name == "nt":
                 #     expected = toWin(str(expected))
                 #     actual = toWin(str(actual))
 
-                eh, ah = sha256(expected), sha256(actual)
-                es, ass = expected.stat().st_size, actual.stat().st_size
+                # eh, ah = sha256(expected), sha256(actual)
+                # es, ass = expected.stat().st_size, actual.stat().st_size
 
+                eh, ah = expected["checksum"], sha256(actual)
+                es, ass = int(expected["size"]), actual.stat().st_size
                 ok = eh == ah and es == ass
 
                 if ok:
                     count = count + 1
+                    match_count += 1
+                os.unlink(str(actual))
+                if isCBT or not bool(isRegularFile):
+                    for p in actual.parent.rglob("*_[0-9][0-9][0-9][0-9]"):
+                        if p.is_file():
+                            os.unlink(str(p))
             except Exception as e:
                 print("ERROR IN Restore validation: ", e)
 
-        text = "INC" if int(v) > 1 else "FULL"
-
-        if not bool(isRegularFile):
-            text = "INC-SPLIT" if int(v) > 1 else "FULL-SPLIT"
+        tc_name = "REGULARFILE-RESTORE-VALIDATION"
         if isCBT:
-            text = "INC-CBT" if int(v) > 1 else "FULL-CBT"
+            tc_name = "CBT-RESTORE-VALIDATION"
+        if bool(isRegularFile):
+            tc_name = "SPLIT-RESTORE-VALIDATION"
 
         self.add(
-            f"{text}-Restore-{v:03d}",
-            "Restore Integrity Verification",
+            tc_name,
+            f"Restore Integrity Verification-IBVER{v:03d}",
             "PASS" if count == len(uploadedFiles) else "FAIL",
-            "Uploaded File Matched Actual",
-            "Downloaded File Version Matched Actual",
+            f"Uploaded Count -{len(uploadedFiles)}",
+            f"Integrity Matched - {match_count}",
             f"Build: {self.tool.build.name}",
             duration,
         )
@@ -448,7 +475,19 @@ class Regression:
         dest = self.restored / f"V{v:03d}"
 
         dest.mkdir(parents=True, exist_ok=True)
-        self.tool.restore(fl, dest, f"restore_V{v:03d}", isBuildSame)
+        r = self.tool.restore(fl, dest, f"restore_V{v:03d}", isBuildSame)
+        if r is not None:
+            status = "PASS" if r["return_code"] == 0 else "FAIL"
+            self.add(
+                tid="REGULAR-FILE-RESTORE",
+                desc=f"Regular File Restore - IBVER{v:3d}",
+                status=status,
+                expected="-",
+                actual="-",
+                build=f"{self.tool.build.name}",
+                details="",
+                duration=r["duration"],
+            )
 
         snapFiles: list[Path] = []
 
@@ -557,7 +596,7 @@ class Regression:
 
         return count == TOTAL_VERSIONS - 1
 
-    def _extract_fname(self, pattern, stdout: str) -> list[str]:
+    def _extract_fname(self, pattern, stdout: str, unique: bool = True) -> list[str]:
         # pattern = r'fname="([^"]*)"'
         itemsFound = re.findall(pattern, stdout)
         paths = []
@@ -572,9 +611,12 @@ class Regression:
             data = data.replace("&quot;", '"')
             data = data.replace("&lt;", "<")
             data = data.replace("&gt;", ">")
-            if data.strip() not in paths_set:
+            if unique and data.strip() not in paths_set:
                 paths_set.add(data.strip())
                 paths.append(data.strip())
+            if not unique:
+                paths.append(data.strip())
+
         return paths
 
     def upload_get_ordered_file_paths(self, v, files) -> list[Path]:
@@ -752,58 +794,67 @@ class Regression:
         meta = PathMetadata()
 
         # 1. CBT Backup
-        # origin_files_to_split = {}
-        #
-        # for v in range(1, TOTAL_VERSIONS + 1):
-        #     cbt_info = mutate_cbt_files(v=v, files=cbt_files, size=1024 * 1024 * 1)
-        #     out = self.cbt_backup(v, files=cbt_files, cbt_info=cbt_info)
-        #
-        #     origin_files_to_split = out["origin_files_to_split"]
-        #
-        #     ordered_file_paths = out["ordered_file_paths"]
-        #
-        #     for file in ordered_file_paths:
-        #         self.update_versioned_files_in_db(
-        #             v, meta, file, deviceID, compID, is_Regular_file=0
-        #         )
-        #
-        # # 2. CBT - Restore and validate restores
-        # stats = {}
-        #
-        # for v in range(1, TOTAL_VERSIONS + 1):
-        #     batch_stat = self.split_restore(
-        #         original_files=origin_files_to_split, v=v, split_count=2, isCBT=True
-        #     )
-        #     for k, v in batch_stat.items():
-        #         if k in stats:
-        #             stats[k].append(v)
-        #         else:
-        #             stats[k] = [v]
-        #
-        # # 2 a) verify cbt file versions
-        #
-        # for path in origin_files_to_split.keys():
-        #     file = Path(path)
-        #     r = self.tool.version_info(True, rp=file, isRegularFile=0)
-        #     if r is None:
-        #         return
-        #     isVerified = self.validate_versions(
-        #         out=r["stdout"],
-        #         remotepath=str(file),
-        #         uploadedStats=stats,
-        #         isRegularFile=0,
-        #         isCBT=True,
-        #     )
-        #     self.add(
-        #         "CBT-VERSIONS",
-        #         "Retrieve & Verify version history of CBT files",
-        #         "PASS" if isVerified else "FAIL",
-        #         f"Version-info of {file.name} succeeds",
-        #         str(r["return_code"]),
-        #         r["stderr"],
-        #         f"Build: {self.tool.build.name}",
-        #         r["duration"],
-        #     )
+        origin_files_to_split = {}
+
+        for v in range(1, TOTAL_VERSIONS + 1):
+            cbt_info = mutate_cbt_files(v=v, files=cbt_files, size=1024 * 1024 * 1)
+            out = self.cbt_backup(v, files=cbt_files, cbt_info=cbt_info)
+
+            origin_files_to_split = out["origin_files_to_split"]
+
+            ordered_file_paths = out["ordered_file_paths"]
+
+            for file in ordered_file_paths:
+                self.update_versioned_files_in_db(
+                    v, meta, file, deviceID, compID, is_Regular_file=0
+                )
+
+        # 2. CBT - Restore and validate restores
+        stats = {}
+
+        for v in range(1, TOTAL_VERSIONS + 1):
+            batch_stat = self.split_restore(
+                original_files=origin_files_to_split, v=v, split_count=2, isCBT=True
+            )
+            for k, v in batch_stat.items():
+                if k in stats:
+                    stats[k].append(v)
+                else:
+                    stats[k] = [v]
+
+        # 2 a) verify cbt file versions
+
+        for path in origin_files_to_split.keys():
+            file = Path(path)
+            r = self.tool.version_info(True, rp=file, isRegularFile=0, isCBT=True)
+            if r is None:
+                return
+            isVerified = self.validate_versions(
+                out=r["stdout"],
+                remotepath=str(file),
+                uploadedStats=stats,
+                isRegularFile=0,
+                isCBT=True,
+            )
+            self.add(
+                "CBT-VERSION-HISTORY",
+                f"Retrieve & Verify version history of CBT file - {file.name}",
+                "PASS" if isVerified else "FAIL",
+                f"Version-info of {file.name} succeeds",
+                str(r["return_code"]),
+                r["stderr"],
+                f"Build: {self.tool.build.name}",
+                r["duration"],
+            )
+            try:
+                os.unlink(path)
+                for p in file.parent.rglob("*_[0-9][0-9][0-9][0-9]"):
+                    if p.is_file():
+                        os.unlink(str(p))
+            except Exception as e:
+                print(e)
+
+        self.validate_backup(isRegularFile=0, module="CBT-AUTH-LIST")
 
         # 3. Split Backup
         origin_files_to_split = {}
@@ -820,14 +871,14 @@ class Regression:
             time.sleep(2)
 
         # 4. Validate Split & CBT backups
-        self.validate_backup(isRegularFile=0, module="AUTH-SPLIT/CBT-FILES")
+        self.validate_backup(isRegularFile=0, module="SPLIT-AUTH-LIST")
 
         # 5. Split Restore and validate restores
         stats = {}
 
         for v in range(1, TOTAL_VERSIONS + 1):
             batch_stat = self.split_restore(
-                original_files=origin_files_to_split, v=v, split_count=7
+                original_files=origin_files_to_split, v=v, split_count=SPLIT_COUNT
             )
             for k, v in batch_stat.items():
                 if k in stats:
@@ -849,8 +900,8 @@ class Regression:
                 isRegularFile=0,
             )
             self.add(
-                "VERSIONS-SPLIT/CBT-BACKUP",
-                "Retrieve & Verify version history",
+                "SPLIT-VERSION-HISTORY",
+                f"Retrieve & Verify version history - {file.name}",
                 "PASS" if isVerified else "FAIL",
                 f"Version-info of {file.name} succeeds",
                 str(r["return_code"]),
@@ -858,6 +909,14 @@ class Regression:
                 f"Build: {self.tool.build.name}",
                 r["duration"],
             )
+            try:
+                for v in range(SPLIT_COUNT):
+                    suffix = f"_{v:04d}"
+                    file = path + suffix
+                    os.unlink(file)
+                os.unlink(file)
+            except Exception as e:
+                print(e)
 
         # 7. Regular file backup
         for v in range(1, TOTAL_VERSIONS + 1):
@@ -910,8 +969,8 @@ class Regression:
                 return
             isVerified = self.validate_versions(r["stdout"], str(file), stats)
             self.add(
-                "SANITY-VERSIONS",
-                "Retrieve & Verify version history",
+                "REGULAR-FILE-VERSION-HISTORY",
+                f"Retrieve & Verify version history - {file.name}",
                 "PASS" if isVerified else "FAIL",
                 f"Version-info of {file.name} succeeds",
                 str(r["return_code"]),
@@ -919,6 +978,10 @@ class Regression:
                 f"Build: {self.tool.build.name}",
                 r["duration"],
             )
+            try:
+                os.unlink(str(file))
+            except Exception as e:
+                print(e)
 
         self.tool.toogleBuild(False)
         if not isBuildSame:
@@ -957,25 +1020,27 @@ class Regression:
             pattern = r'fname="([^"]*)"'
             fnames = self._extract_fname(pattern, out)
             pattern = r'status="([^"]*)"'
-            statuses = self._extract_fname(pattern, out)
+            statuses = self._extract_fname(pattern, out, unique=False)
             pattern = r'sessionID="([^"]*)"'
             sessions = self._extract_fname(pattern, out)
             session = list(set(sessions))
             sessionID = session[0]
             file_count = len(fnames)
+            print("sync-chk-filecount: ", file_count)
+            print("status: ", len(statuses))
             for fname, status in zip(fnames, statuses):
                 if status == "FAILURE":
                     file_count -= 1
 
             result = "PASS" if file_count == 0 else "FAIL"
 
-        tc_name = f"SPLIT-BKP-SYNC-CHK-{v:03d}"
+        tc_name = "SPLIT-BKP-SYNC-CHK"
         if isCBT:
-            tc_name = f"CBT-BKP-SYNC-CHK-{v:03d}"
+            tc_name = "CBT-BKP-SYNC-CHK"
 
-        desc = "Split Backup Sync Check"
+        desc = f"Split Backup Sync Check-{v:03d}"
         if isCBT:
-            desc = "CBT Backup Sync Check"
+            desc = f"CBT Backup Sync Check-{v:03d}"
 
         self.add(
             tc_name,
@@ -1046,8 +1111,8 @@ class Regression:
             result = "PASS" if r["return_code"] == 0 else "FAIL"
 
         self.add(
-            f"CBT-MATCH-BACKUP-{v:03d}",
-            "Sending CBT Match splits",
+            "CBT-MATCH",
+            f"Sending CBT Match splits-{v:03d}",
             f"{result}",
             "Match Split",
             str(r["return_code"]),
@@ -1123,13 +1188,13 @@ class Regression:
                 output=r["stdout"], v=v
             )
 
-        tc_name = f"SPLIT-SPLITBACKUP-{v:03d}"
+        tc_name = "SPLIT-SPLITBACKUP"
         if isCBT:
-            tc_name = f"CBT-SPLIT-BACKUP2-{v:03d}"
+            tc_name = "CBT-SPLITBACKUP"
 
-        desc = "CBT Backup After Sync Check"
+        desc = f"CBT Backup After Sync Check-{v:03d}"
         if not isCBT:
-            desc = "Split Backup After Sync Check"
+            desc = f"Split Backup After Sync Check-{v:03d}"
 
         self.add(
             tc_name,
@@ -1189,14 +1254,14 @@ class Regression:
         if r is not None:
             result = "PASS" if r["return_code"] == 0 else "FAIL"
 
-        tc_name = f"SPLIT-BKP-SEND-META-{v:03d}"
+        tc_name = "SPLIT-SEND-METADATA"
         if isCBT:
-            tc_name = f"CBT-BKP-SEND-META-{v:03d}"
+            tc_name = "CBT-SEND-METADATA"
 
-        desc = "Split Backup Send Metadata"
+        desc = f"Split Backup Send Metadata-{v:03d}"
 
         if isCBT:
-            desc = "CBT Backup Send Metadata"
+            desc = f"CBT Backup Send Metadata-{v:03d}"
 
         self.add(
             tc_name,
@@ -1211,7 +1276,7 @@ class Regression:
 
         return result == "PASS"
 
-    def split_receive_metadata(self, fl: Path, dst: str, v: int):
+    def split_receive_metadata(self, fl: Path, dst: str, v: int, isCBT: bool = False):
         # Metadata-receive:
         # ==============
         # Input: /IDDriveImage/random_1gb_file1.bin_config.xml_IBVER001
@@ -1240,9 +1305,16 @@ class Regression:
             output = r["stdout"]
             metadata = extract_split_received_metadata(output)
 
+        tc_name = "SPLIT-RESTORE-RECEIVE-METADATA"
+        desc = f"Split Restore Receive Metadata-{v:03d}"
+
+        if isCBT:
+            tc_name = "CBT-RESTORE-RECEIVE-METADATA"
+            desc = f"CBT Restore Receive Metadata-{v:03d}"
+
         self.add(
-            f"SPLIT-RESTORE-RECEIVE-META-{v:03d}",
-            "Split Restore Receive Metadata",
+            tc_name,
+            desc,
             f"{result}",
             "Receive Metadata",
             str(r["return_code"]),
@@ -1258,6 +1330,7 @@ class Regression:
         fl: Path,
         dst: str = "/",
         v: int = 1,
+        isCBT: bool = False,
     ):
         # Split-res
         # ./idevsutil --xml-output --add-progress --files-from=/home/opt/file.txt  --device-id=5c0bD017718384600007254654b5z --password-file=1234 --port=900 test1@localhost::home/ /home/IDdr/ --split-res
@@ -1285,9 +1358,13 @@ class Regression:
         if r is not None:
             result = "PASS" if r["return_code"] == 0 else "FAIL"
 
+        tc_name = "SPLIT-RESTORE-SPLITS"
+        if isCBT:
+            tc_name = "CBT-RESTORE-SPLITS"
+
         self.add(
-            f"SPLIT-RESTORE-{v:03d}",
-            "Restore Splits",
+            tc_name,
+            f"Restore Splits-{v:03d}",
             f"{result}",
             "Restore Splits",
             str(r["return_code"]),
@@ -1323,9 +1400,12 @@ class Regression:
             result = "PASS" if r["return_code"] == 0 else "FAIL"
 
         name = Path(target_file).name
+        tc_name = "SPLIT-MERGE-SPLITS"
+        if isCBT:
+            tc_name = "CBT-MERGE-SPLITS"
         self.add(
-            f"SPLIT-RESTORE-MERGE-SPLITS-{name}",
-            "Merge Restored Splits",
+            tc_name,
+            f"Merge Splits-{name}:IBVER{v:03d}",
             f"{result}",
             "Merge Splits",
             str(r["return_code"]),
@@ -1396,20 +1476,25 @@ class Regression:
         if not dst.exists():
             dst.mkdir(parents=True, exist_ok=True)
 
-        split_meta = self.split_receive_metadata(fl=fl, dst=str(dst), v=v)
+        split_meta = self.split_receive_metadata(fl=fl, dst=str(dst), v=v, isCBT=isCBT)
 
         # fl = self.split_lists / f"restore_{v:03d}_split_restore.txt"
         fl = filelist / split_restore_name
 
-        self._split_restore(split_meta=split_meta, fl=fl, dst=str(dst), v=v)
+        self._split_restore(
+            split_meta=split_meta, fl=fl, dst=str(dst), v=v, isCBT=isCBT
+        )
 
-        for path in original_files.keys():
+        for path, value in original_files.items():
             abs_path = Path(dst).joinpath(path.lstrip("/"))
             if os.name == "nt":
                 path_posix = toPosix(Path(path)).lstrip("/")
                 abs_path = Path(dst).joinpath(path_posix)
+            count = len(value["splits_info"])
 
-            self.merge_splits(target_file=str(abs_path), split_count=split_count, v=v)
+            self.merge_splits(
+                target_file=str(abs_path), split_count=count, v=v, isCBT=isCBT
+            )
 
         return self.validate_restore(
             dest=dst,
@@ -1482,7 +1567,7 @@ class Regression:
             "ordered_file_paths": ordered_file_paths,
         }
 
-    def validate_backup(self, isRegularFile: int = 1, module: str = "SPLIT-FILES"):
+    def validate_backup(self, isRegularFile: int = 1, module: str = "SPLIT"):
         print("-" * 90)
         if bool(isRegularFile):
             print("FULL & INC Backup Complete. Validating Results..")
@@ -1512,7 +1597,8 @@ class Regression:
                 True, remotePath=dir, isRegularFile=isRegularFile, name=name
             )
             # r = self.tool.search(isSuiteRunning=True, filesOnly=True)
-            tc_name = "AUTH-LIST-REGULAR-FILE" if bool(isRegularFile) else module
+            tc_name = "REGULAR-FILE-AUTH-LIST" if bool(isRegularFile) else module
+
             if r["return_code"] != 0:
                 self.add(
                     tc_name,

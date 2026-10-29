@@ -74,7 +74,7 @@ class IdevsUtil:
     def remote(self, path=""):
         root = self.env.remote_root.strip("/")
         base = f"{self.env.username}@{self.env.server}::{root}/"
-        return base + path.lstrip("/") if path else base
+        return base + f"{path.lstrip('/')}" if path else base
 
     def convert_to_utf8_enc_cmd(
         self, args: List[str], executable: str
@@ -255,7 +255,7 @@ class IdevsUtil:
             ):
                 cmd.append(f"--device-id={self.env.device_id}")
 
-            cmd.append("--tls")
+            # cmd.append("--tls")
 
             print("\n" + "=" * 90)
             print(f"BUILD   : {self.build.name} / {self.build.release}")
@@ -434,6 +434,7 @@ class IdevsUtil:
         isSuiteRunning: bool = False,
         rp: Path = Path("/"),
         isRegularFile: int = 1,
+        isCBT: bool = False,
     ):
         remotePath: str
         if isRegression:
@@ -453,9 +454,11 @@ class IdevsUtil:
             a.append("--split-backup")
         a.append("--xml-output")
         a.append(self.remote(remotePath))
-        name = "version_info"
-        if not bool(isRegularFile):
-            name = "version_info_split_backup"
+        name = "regular_version_info"
+        if isCBT:
+            name = "cbt_version_info"
+        if not bool(isRegularFile) and not isCBT:
+            name = "split_bkp_version_info"
         return self.run(a, name)
 
     def search(
@@ -1025,9 +1028,9 @@ class IdevsUtil:
         name,
         isBuildSame: bool = True,
         isSuiteRunning: bool = False,
-        filesToDownload: List[str] = [],
+        filesToDownload: list[str] = [],
     ):
-        a: List[str] = []
+        a: list[str] = []
         poisx_path: str
         a.append("--xml-output")
         if os.name == "nt":

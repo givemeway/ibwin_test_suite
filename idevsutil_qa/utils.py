@@ -372,7 +372,8 @@ def verify_chunk(
 
 
 def info(path: Path) -> dict:
-    return {"size": path.stat().st_size, "sha256": sha256(path)}
+    stat = path.stat()
+    return {"size": stat.st_size, "sha256": sha256(path), "mdt": stat.st_mtime}
 
 
 def create_test_file(path: Path, mb: int, seed: int = 12345):
@@ -461,7 +462,13 @@ def toWin(path: str) -> Path:
     if not path.startswith("\\"):
         idx = 0
     parts = path.split("\\")[idx:]
-    file = parts[0] + ":" + "\\" + "\\".join(parts[1:])
+    drive = parts[0]
+    components = parts[1:]
+    if parts[0].endswith(":"):
+        drive = drive.split(":")[0]
+
+    file = drive + ":" + "\\" + "\\".join(components)
+
     return Path(file)
 
 
