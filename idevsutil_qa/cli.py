@@ -65,6 +65,12 @@ def parse_args():
         help="Command timeout in seconds.",
     )
     parser.add_argument(
+        "--tls",
+        type=int,
+        default=1,
+        help="Command timeout in seconds.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Generate files/commands but do not execute idevsutil.",

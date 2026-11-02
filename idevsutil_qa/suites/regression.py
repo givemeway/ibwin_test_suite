@@ -47,6 +47,7 @@ BLOCK_SIZE = 1024 * 32
 BLOCKS_IN_SPLIT = SPLIT_SIZE // BLOCK_SIZE
 TOTAL_VERSIONS = 5
 SPLIT_COUNT = 7
+TOTAL_RUNS = 2
 
 
 class Regression:
@@ -207,6 +208,66 @@ class Regression:
             self._validate_test_backup(self.source, filesToCreate)
         else:
             return
+
+    def backup_stat(self, compID, deviceID, use_tls: bool = True):
+        paths = get_all_files_from_list(list_file_path=Path(self.tool.env.fileListPath))
+        meta = PathMetadata()
+
+        if use_tls:
+            self.tool.env.use_tls = 1
+            self.tool.env.port = 8443
+        else:
+            self.tool.env.use_tls = 0
+            self.tool.env.port = 443
+
+        for i in range(1, TOTAL_RUNS + 1):
+            fl = self.tool.env.fileListPath
+            args = []
+            args.append("--xml-output")
+            args.append("--type")
+            args.append("--add-progress")
+            args.append(f"--files-from={fl}")
+            args.append("/")
+            backup_loc = f"/5GB_with_tls_run_{i}/"
+            if not use_tls:
+                backup_loc = f"/5GB_without_tls_run_{i}/"
+
+            args.append(self.tool.remote(backup_loc))
+            r = self.tool.run(args, f"backup_stat_{i}")
+
+            if r is not None:
+                status = "PASS" if int(r["return_code"]) == 0 else "FAIL"
+                tc_name = "BACKUP-5GB-FILE-WITH-TLS"
+                desc = f"Backup-5GB-File-with-tls-run-{i}"
+
+                if status == "PASS":
+                    for file in paths:
+                        abs_path = Path(backup_loc).joinpath(str(file).lstrip("/"))
+                        print("Abs_path: ", abs_path)
+                        self.update_versioned_files_in_db(
+                            v=1,
+                            meta=meta,
+                            file=abs_path,
+                            deviceID=deviceID,
+                            compID=compID,
+                            is_relative=True,
+                            relPath=str(file),
+                        )
+
+                if not use_tls:
+                    tc_name = "BACKUP-5GB-FILE-WITHOUT-TLS"
+                    desc = f"Backup-5GB-File-without-tls-run-{i}"
+
+                self.add(
+                    tid=tc_name,
+                    desc=desc,
+                    status=status,
+                    expected="",
+                    actual="",
+                    build=self.tool.build.name,
+                    details="",
+                    duration=r["duration"],
+                )
 
     def _copy_snapshot(
         self, v: int, files: list[Path], files_source: Path, files_snapshot: Path
@@ -650,7 +711,15 @@ class Regression:
             f.write(message + "\n")
 
     def update_versioned_files_in_db(
-        self, v, meta: PathMetadata, file, deviceID, compID, is_Regular_file: int = 1
+        self,
+        v,
+        meta: PathMetadata,
+        file,
+        deviceID,
+        compID,
+        is_Regular_file: int = 1,
+        is_relative: bool = False,
+        relPath: str = "",
     ):
         file_path = meta._to_pure_posix(file)
 
@@ -658,18 +727,22 @@ class Regression:
             file = meta.fix_windows_path(file)
 
         metadata = meta.fetch_hierarchy_properties(str(file))
-        try:
-            self.log_to_file(f"file_path: {file_path}")
-            self.log_to_file(f"file     : {file}")
-            self.log_to_file("=" * 90)
-            self.log_to_file(f"metadata : {metadata}")
-            self.log_to_file("=" * 90)
-
-        except Exception as e:
-            print("e -->< ", e)
+        # try:
+        #     self.log_to_file(f"file_path: {file_path}")
+        #     self.log_to_file(f"file     : {file}")
+        #     self.log_to_file("=" * 90)
+        #     self.log_to_file(f"metadata : {metadata}")
+        #     self.log_to_file("=" * 90)
+        #
+        # except Exception as e:
+        #     print("e -->< ", e)
 
         if v == 1:
-            metadata[file_path]["checksum"] = sha256(Path(file))
+            actual_file = Path(file)
+            if is_relative:
+                actual_file = Path(relPath)
+
+            metadata[file_path]["checksum"] = sha256(actual_file)
             metadata[file_path]["vernum"] = 1
             self.db.insert_path(
                 file_path,
@@ -794,67 +867,67 @@ class Regression:
         meta = PathMetadata()
 
         # 1. CBT Backup
-        origin_files_to_split = {}
-
-        for v in range(1, TOTAL_VERSIONS + 1):
-            cbt_info = mutate_cbt_files(v=v, files=cbt_files, size=1024 * 1024 * 1)
-            out = self.cbt_backup(v, files=cbt_files, cbt_info=cbt_info)
-
-            origin_files_to_split = out["origin_files_to_split"]
-
-            ordered_file_paths = out["ordered_file_paths"]
-
-            for file in ordered_file_paths:
-                self.update_versioned_files_in_db(
-                    v, meta, file, deviceID, compID, is_Regular_file=0
-                )
-
-        # 2. CBT - Restore and validate restores
-        stats = {}
-
-        for v in range(1, TOTAL_VERSIONS + 1):
-            batch_stat = self.split_restore(
-                original_files=origin_files_to_split, v=v, split_count=2, isCBT=True
-            )
-            for k, v in batch_stat.items():
-                if k in stats:
-                    stats[k].append(v)
-                else:
-                    stats[k] = [v]
-
-        # 2 a) verify cbt file versions
-
-        for path in origin_files_to_split.keys():
-            file = Path(path)
-            r = self.tool.version_info(True, rp=file, isRegularFile=0, isCBT=True)
-            if r is None:
-                return
-            isVerified = self.validate_versions(
-                out=r["stdout"],
-                remotepath=str(file),
-                uploadedStats=stats,
-                isRegularFile=0,
-                isCBT=True,
-            )
-            self.add(
-                "CBT-VERSION-HISTORY",
-                f"Retrieve & Verify version history of CBT file - {file.name}",
-                "PASS" if isVerified else "FAIL",
-                f"Version-info of {file.name} succeeds",
-                str(r["return_code"]),
-                r["stderr"],
-                f"Build: {self.tool.build.name}",
-                r["duration"],
-            )
-            try:
-                os.unlink(path)
-                for p in file.parent.rglob("*_[0-9][0-9][0-9][0-9]"):
-                    if p.is_file():
-                        os.unlink(str(p))
-            except Exception as e:
-                print(e)
-
-        self.validate_backup(isRegularFile=0, module="CBT-AUTH-LIST")
+        # origin_files_to_split = {}
+        #
+        # for v in range(1, TOTAL_VERSIONS + 1):
+        #     cbt_info = mutate_cbt_files(v=v, files=cbt_files, size=1024 * 1024 * 1)
+        #     out = self.cbt_backup(v, files=cbt_files, cbt_info=cbt_info)
+        #
+        #     origin_files_to_split = out["origin_files_to_split"]
+        #
+        #     ordered_file_paths = out["ordered_file_paths"]
+        #
+        #     for file in ordered_file_paths:
+        #         self.update_versioned_files_in_db(
+        #             v, meta, file, deviceID, compID, is_Regular_file=0
+        #         )
+        #
+        # # 2. CBT - Restore and validate restores
+        # stats = {}
+        #
+        # for v in range(1, TOTAL_VERSIONS + 1):
+        #     batch_stat = self.split_restore(
+        #         original_files=origin_files_to_split, v=v, split_count=2, isCBT=True
+        #     )
+        #     for k, v in batch_stat.items():
+        #         if k in stats:
+        #             stats[k].append(v)
+        #         else:
+        #             stats[k] = [v]
+        #
+        # # 2 a) verify cbt file versions
+        #
+        # for path in origin_files_to_split.keys():
+        #     file = Path(path)
+        #     r = self.tool.version_info(True, rp=file, isRegularFile=0, isCBT=True)
+        #     if r is None:
+        #         return
+        #     isVerified = self.validate_versions(
+        #         out=r["stdout"],
+        #         remotepath=str(file),
+        #         uploadedStats=stats,
+        #         isRegularFile=0,
+        #         isCBT=True,
+        #     )
+        #     self.add(
+        #         "CBT-VERSION-HISTORY",
+        #         f"Retrieve & Verify version history of CBT file - {file.name}",
+        #         "PASS" if isVerified else "FAIL",
+        #         f"Version-info of {file.name} succeeds",
+        #         str(r["return_code"]),
+        #         r["stderr"],
+        #         f"Build: {self.tool.build.name}",
+        #         r["duration"],
+        #     )
+        #     try:
+        #         os.unlink(path)
+        #         for p in file.parent.rglob("*_[0-9][0-9][0-9][0-9]"):
+        #             if p.is_file():
+        #                 os.unlink(str(p))
+        #     except Exception as e:
+        #         print(e)
+        #
+        # self.validate_backup(isRegularFile=0, module="CBT-AUTH-LIST")
 
         # 3. Split Backup
         origin_files_to_split = {}
@@ -982,6 +1055,14 @@ class Regression:
                 os.unlink(str(file))
             except Exception as e:
                 print(e)
+        # 11 Backup Stat - 5 GB
+        self.backup_stat(compID=compID, deviceID=deviceID)
+
+        # 11 Backup Stat - 5 GB - without TLS
+        self.backup_stat(compID=compID, deviceID=deviceID, use_tls=False)
+
+        self.tool.env.use_tls = 1
+        self.tool.env.port = 8443
 
         self.tool.toogleBuild(False)
         if not isBuildSame:

@@ -57,8 +57,12 @@ class IdevsUtil:
         self.results = []
         self.lock = threading.Lock()
 
-    def add(self, tid, desc, status, expected, actual, build, details=""):
-        self.results.append(Result(tid, desc, status, expected, actual, build, details))
+    def add(self, tid, desc, status, expected, actual, build, details="", duration=""):
+        self.results.append(
+            Result(
+                tid, desc, status, expected, actual, build, details, duration=duration
+            )
+        )
         print(f"[{status}] {tid} - {desc}")
 
     def resetRegression(self):
@@ -255,7 +259,9 @@ class IdevsUtil:
             ):
                 cmd.append(f"--device-id={self.env.device_id}")
 
-            # cmd.append("--tls")
+            if bool(self.env.use_tls):
+                cmd.append("--tls")
+                cmd.append("--tls-hostname=localhost")
 
             print("\n" + "=" * 90)
             print(f"BUILD   : {self.build.name} / {self.build.release}")
@@ -762,16 +768,16 @@ class IdevsUtil:
         isSuiteRunning: bool = False,
         addl_args: list[str] = [],
     ):
-        a: List[str] = []
+        a: list[str] = []
         a.append("--type")
         backup_label = label
         if name == "manual_backup":
-            temp = input("Temp Path: ").strip() or temp_path
+            # temp = input("Temp Path: ").strip() or temp_path
             l = input("Set Label Val? [Y/N] : ").strip()
             if l.lower() == "y":
                 backup_label = input(" Label: ").strip() or label
-            if temp != "":
-                a.append(f"--temp={temp_path}")
+            # if temp != "":
+            #     a.append(f"--temp={temp_path}")
         a.append("--xml-output")
         if backup_label != "":
             a.append(f"--label-val={backup_label}")
@@ -900,6 +906,7 @@ class IdevsUtil:
                 str(r["return_code"]),
                 r["stderr"],
                 f"Build: {self.build.name}",
+                r["duration"],
             )
             return False
         else:
@@ -931,7 +938,9 @@ class IdevsUtil:
                 str(r["return_code"]),
                 r["stderr"],
                 f"Build: {self.build.name}",
+                r["duration"],
             )
+
         # self.finish()
 
     def backup(self, isSuiteRunning: bool = False, filesToCreate: list[str] = []):
@@ -955,29 +964,31 @@ class IdevsUtil:
 
             if r["return_code"] != 0:
                 self.add(
-                    "Backup",
+                    "MANUAL BACKUP",
                     "Full Backup",
                     "FAIL",
                     "Return code 0",
                     str(r["return_code"]),
                     r["stderr"],
                     f"Build: {self.build.name}",
+                    r["duration"],
                 )
                 return False
             else:
                 self.add(
-                    "1LAC-BKP",
+                    "MANUAL BACKUP",
                     "FULL Backup",
                     "PASS",
                     "Return code 0",
                     str(r["return_code"]),
                     r["stderr"],
                     f"Build: {self.build.name}",
+                    r["duration"],
                 )
             self.finish()
 
-    def _validate_restore(self, dest: Path, uploadedFiles: List[Path]):
-        restored: List[Path] = []
+    def _validate_restore(self, dest: Path, uploadedFiles: list[Path]):
+        restored: list[Path] = []
         for root, _, files in os.walk(str(dest)):
             for filename in files:
                 file_path = Path(root).joinpath(filename)
@@ -1123,6 +1134,7 @@ class IdevsUtil:
                 str(r["return_code"]),
                 r["stderr"],
                 f"Build: {self.build.name}",
+                r["duration"],
             )
             return False
         else:
@@ -1134,6 +1146,7 @@ class IdevsUtil:
                 str(r["return_code"]),
                 r["stderr"],
                 f"Build: {self.build.name}",
+                r["duration"],
             )
 
         out2 = self.create_checksum(
@@ -1213,6 +1226,7 @@ class IdevsUtil:
                     str(r["return_code"]),
                     r["stderr"],
                     f"Build: {self.build.name}",
+                    r["duration"],
                 )
                 return False
             else:
@@ -1224,6 +1238,7 @@ class IdevsUtil:
                     str(r["return_code"]),
                     r["stderr"],
                     f"Build: {self.build.name}",
+                    r["duration"],
                 )
 
     def create_link(
@@ -1401,6 +1416,7 @@ class IdevsUtil:
                     str(r["return_code"]),
                     r["stderr"],
                     f"Build: {self.build.name}",
+                    r["duration"],
                 )
                 return False
             else:
@@ -1412,6 +1428,7 @@ class IdevsUtil:
                     str(r["return_code"]),
                     r["stderr"],
                     f"Build: {self.build.name}",
+                    r["duration"],
                 )
 
     def custom(self, isSuiteRunning: bool = False):

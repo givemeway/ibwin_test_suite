@@ -224,6 +224,9 @@ class Console:
                 input(f"Server Root : [{self.env.server_root}]").strip()
                 or self.env.server_root
             )
+            self.env.use_tls = int(
+                input(f"Use TLS : [{self.env.use_tls}]").strip() or self.env.use_tls
+            )
 
         else:
             if isinstance(args, argparse.Namespace):
@@ -239,6 +242,7 @@ class Console:
                 self.env.workspace = args.workspace
                 self.env.syncDedup = args.sync_dedup
                 self.env.server_root = args.server_root
+                self.env.use_tls = args.tls
                 print("\n" + "-" * 90)
                 print("Environment Configured")
                 print("-" * 90)
@@ -255,6 +259,7 @@ class Console:
                 print(f"\n Workspace        : [{self.env.workspace}]")
                 print(f"\n SyncDedup        : [{self.env.syncDedup}]")
                 print(f"\n Server Root      : [{self.env.server_root}]")
+                print(f"\n Use TLS          : [{self.env.use_tls}]")
                 print("\n" + "-" * 90)
 
             else:
@@ -309,6 +314,9 @@ class Console:
                 self.env.server_root = (
                     input(f"Server Root : [{self.env.server_root}]").strip()
                     or self.env.server_root
+                )
+                self.env.use_tls = int(
+                    input(f"Use TLS : [{self.env.use_tls}]").strip() or self.env.use_tls
                 )
         if not isReconfigure:
             print("Environment Configuration")
@@ -482,7 +490,7 @@ class Console:
     def cbt_integrity_check(self):
         src_path = input(" Source File Path: ").strip()
         dst_path = input(" Path to the file to verify: ").strip()
-        chunked_hashes: List[str] = sha256_chunked(Path(src_path), 1024 * 1024)
+        chunked_hashes: list[str] = sha256_chunked(Path(src_path), 1024 * 1024)
         for chunk_index, chunk_hash in enumerate(chunked_hashes):
             checked = verify_chunk(
                 Path(dst_path), chunk_index, chunk_hash, chunk_size=1024 * 1024

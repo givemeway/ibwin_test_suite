@@ -252,6 +252,7 @@ class Environment:
     is_test_machine: int = 0
     use_utf8_encryption: int = 0
     dedup: int = 1
+    use_tls = 1
     syncDedup: int = 0
     fileListPath: str = "/home/sandeep/filelist.txt"
     linkFileListPath: str = "/home/sandeep/filelist_link.txt"
