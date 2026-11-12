@@ -81,8 +81,8 @@ class IdevsUtil:
         return base + f"{path.lstrip('/')}" if path else base
 
     def convert_to_utf8_enc_cmd(
-        self, args: List[str], executable: str
-    ) -> List[str] | None:
+        self, args: list[str], executable: str
+    ) -> list[str] | None:
         if self.build.isTestBed == 1 and self.env.port:
             args.append(f"--port={self.env.port}")
 
@@ -220,8 +220,9 @@ class IdevsUtil:
         args,
         name="command",
         isBuildSame: bool = True,
+        isMultiple_device_id: bool = False,
     ) -> dict[str, str] | None:
-        cmd: List[str] | None = []
+        cmd: list[str] | None = []
 
         if name != "sys_cmds":
             executable = self.build.working_dir + self.build.executable
@@ -256,12 +257,13 @@ class IdevsUtil:
                 and int(self.env.dedup) == 1
                 and name != "create_bucket"
                 and not bool(self.env.syncDedup)
+                and not isMultiple_device_id
             ):
                 cmd.append(f"--device-id={self.env.device_id}")
 
-            if bool(self.env.use_tls):
-                cmd.append("--tls")
-                cmd.append("--tls-hostname=localhost")
+            # if bool(self.env.use_tls):
+            #     cmd.append("--tls")
+            #     cmd.append("--tls-hostname=localhost")
 
             print("\n" + "=" * 90)
             print(f"BUILD   : {self.build.name} / {self.build.release}")
@@ -272,7 +274,7 @@ class IdevsUtil:
                 cmd = self.convert_to_utf8_enc_cmd(args, executable)
 
             start = time.perf_counter()
-            if isinstance(cmd, List):
+            if isinstance(cmd, list):
                 try:
                     p = subprocess.run(
                         cmd,
@@ -372,7 +374,7 @@ class IdevsUtil:
         self,
         fl: str = "",
         isSuiteRunning: bool = False,
-        itemsToDelete: List[str] = [],
+        itemsToDelete: list[str] = [],
         v: str = "",
     ):
         file_list = fl
@@ -441,6 +443,7 @@ class IdevsUtil:
         rp: Path = Path("/"),
         isRegularFile: int = 1,
         isCBT: bool = False,
+        use_tls: bool = True,
     ):
         remotePath: str
         if isRegression:
@@ -460,11 +463,14 @@ class IdevsUtil:
             a.append("--split-backup")
         a.append("--xml-output")
         a.append(self.remote(remotePath))
-        name = "regular_version_info"
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+        name = f"{tls_name}_regular_version_info"
         if isCBT:
-            name = "cbt_version_info"
+            name = f"{tls_name}_cbt_version_info"
         if not bool(isRegularFile) and not isCBT:
-            name = "split_bkp_version_info"
+            name = f"{tls_name}_split_bkp_version_info"
         return self.run(a, name)
 
     def search(

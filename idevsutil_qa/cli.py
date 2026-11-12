@@ -77,6 +77,13 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--auto-run",
+        type=int,
+        default=0,
+        help="To automate the backups",
+    )
+
+    parser.add_argument(
         "--utf8-cmd",
         type=int,
         default=0,

@@ -433,6 +433,7 @@ class FileTreeDatabase:
         is_folder: int = 0,
         isRegularFile: int = 1,
         findAll: bool = False,
+        stmt: str = "",
     ) -> list[dict[str, Any]]:
         rows: list[sqlite3.Row] = []
         if isinstance(table, str):
@@ -448,7 +449,8 @@ class FileTreeDatabase:
                     )
                 else:
                     query = f"SELECT * FROM {table};"
-
+            if stmt != "":
+                query = stmt
             rows = self.conn.execute(query).fetchall()
 
         elif isinstance(table, list):
@@ -580,7 +582,6 @@ class FileTreeDatabase:
         parts = [part for part in path.strip("/").split("/") if part]
         if not parts:
             return None
-
         filters = ""
         extra: list[Any] = []
         if isRegularFile is not None:

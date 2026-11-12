@@ -287,5 +287,41 @@
     "working_dir": "/home/code/2026/DEDUP/tls/26OCT26/CLIENT/",
     "isTestBed": 1,
     "oppositeBuild": "4"
+  },
+"25": {
+    "name": "Test",
+    "executable": "idevsutil",
+    "release": "[CG-1.7.7] [DEDUP] [RELEASE] [2.0.0.7]",
+    "release_date": "[28/SEPT/2026]",
+    "selection": "25",
+    "osname": "posix",
+    "hostname": "Linux-Test-Machine",
+    "working_dir": "/home/code/2026/tls-support/IDRIVE/CLIENT/",
+    "isTestBed": 1,
+    "oppositeBuild": "4"
+  },
+"26": {
+    "name": "Test",
+    "executable": "idevsutil",
+    "release": "[ND] [IDRIVE] [RELEASE] [1.0.2.11]",
+    "release_date": "[16/SEPT/2026]",
+    "selection": "26",
+    "osname": "posix",
+    "hostname": "Linux-Test-Machine",
+    "working_dir": "/home/code/2026/Git2026/tls-support/NonDedup/CLIENT/",
+    "isTestBed": 1,
+    "oppositeBuild": "4"
+  },
+"27": {
+    "name": "Test",
+    "executable": "idevsutil",
+    "release": "[CYGWIN-3.1.7] [SYNC-DEDUP] [RELEASE] [1.0.0.0]",
+    "release_date": "[09/SEPT/2026]",
+    "selection": "27",
+    "osname": "posix",
+    "hostname": "Linux-Test-Machine",
+    "working_dir": "/home/code/2026/tls-support/SYNC+DEDUP/CLIENT/",
+    "isTestBed": 1,
+    "oppositeBuild": "4"
   }
 }

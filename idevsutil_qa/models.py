@@ -257,6 +257,7 @@ class Environment:
     fileListPath: str = "/home/sandeep/filelist.txt"
     linkFileListPath: str = "/home/sandeep/filelist_link.txt"
     userRoot: str = "/home/opt/data"
+    auto_run: int = 0
 
 
 @dataclass
@@ -269,6 +270,7 @@ class Result:
     build: str
     details: str = ""
     duration: str = ""
+    retry: str = "0"
 
 
 @dataclass

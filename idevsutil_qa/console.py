@@ -15,7 +15,7 @@ from .core.idevsutil import IdevsUtil
 from .models import Environment
 from .suites.regression import Regression
 from .suites.search import SearchSuite
-from .utils import get_all_files_from_list, sha256_chunked, verify_chunk
+from .utils import get_all_files_from_list, log_to_file, sha256_chunked, verify_chunk
 from .db import FileTreeDatabase
 
 
@@ -66,7 +66,7 @@ class Console:
         self.history_path = self.env.workspace / "history.json"
         self.history = self.load_history()
         self.run_dir: Path = Path("/")
-        self.conn = self.db()
+        # self.conn = self.db()
 
     def db(self):
         return FileTreeDatabase()
@@ -104,11 +104,18 @@ class Console:
     def run_sanity_suite(self):
         # 1. Delete old account
         self.delete_account()
-        self.conn = self.db()
+        # self.conn = self.db()
+        if bool(self.env.use_tls):
+            self.build.executable = self.build.executable + "_tls"
+        else:
+            self.build.executable = self.build.executable + "_no_tls"
         # 2. create account & configure account
         self.create_account(isSuiteRunning=True)
         # 3. run the backup
-        backup_set = input("Existing Backup Set : [ y / n] : ").strip()
+        backup_set = ""
+        if not int(self.env.auto_run):
+            backup_set = input("Existing Backup Set : [ y / n] : ").strip()
+
         isBackupSet: bool = False
         if backup_set.lower() == "y":
             isBackupSet = True
@@ -125,8 +132,9 @@ class Console:
         )
         # build the file & folder list in the sqlite3 tables
         # files = getFilePaths(self.run_dir, self.testFiles)
-        self.search_suite().run_full_suite()
-        self.conn.close()
+        # self.search_suite().run_full_suite()
+        # self.conn.close()
+
         # accumulate the results
 
     def search_suite(self, files: list[Path] = []) -> SearchSuite:
@@ -243,6 +251,7 @@ class Console:
                 self.env.syncDedup = args.sync_dedup
                 self.env.server_root = args.server_root
                 self.env.use_tls = args.tls
+                self.env.auto_run = args.auto_run
                 print("\n" + "-" * 90)
                 print("Environment Configured")
                 print("-" * 90)
@@ -260,6 +269,7 @@ class Console:
                 print(f"\n SyncDedup        : [{self.env.syncDedup}]")
                 print(f"\n Server Root      : [{self.env.server_root}]")
                 print(f"\n Use TLS          : [{self.env.use_tls}]")
+                print(f"\n Auto Run         : [{self.env.auto_run}]")
                 print("\n" + "-" * 90)
 
             else:
@@ -321,7 +331,12 @@ class Console:
         if not isReconfigure:
             print("Environment Configuration")
             print("-" * 90)
-        w = input(f"Workspace [{self.env.workspace}]: ").strip() or self.env.workspace
+        w = self.env.workspace
+        if not int(self.env.auto_run):
+            w = (
+                input(f"Workspace [{self.env.workspace}]: ").strip()
+                or self.env.workspace
+            )
         if w:
             self.env.workspace = Path(w).resolve()
             self.env.workspace.mkdir(parents=True, exist_ok=True)
@@ -344,6 +359,11 @@ class Console:
             self.env.workspace
             / f"{name if name != 'run' else 'run'}_{self.build.name.lower()}_{time.strftime('%Y%m%d_%H%M%S')}"
         )
+        if int(self.env.auto_run):
+            self.run_dir = (
+                self.env.workspace
+                / f"{name if name != 'run' else 'run'}_{time.time_ns()}"
+            )
         self.run_dir.mkdir(parents=True, exist_ok=True)
         return IdevsUtil(self.build, self.env, self.run_dir)
 
@@ -369,6 +389,11 @@ class Console:
             self.env.workspace
             / f"regression_{self.build.name.lower()}_{time.strftime('%Y%m%d_%H%M%S')}"
         )
+        if int(self.env.auto_run):
+            self.run_dir = (
+                self.env.workspace
+                / f"regression_{self.build.name.lower()}_{time.time_ns()}"
+            )
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         files: list[Path] = []
@@ -398,7 +423,7 @@ class Console:
             ),
             self.run_dir,
             size_mb=1,
-            db=self.conn,
+            db=None,  # self.conn,
             filename="sandeep.txt",
             label="",
         ).run(
@@ -499,6 +524,11 @@ class Console:
             print(f" Verified Chunk Index: {chunk_index + 1} |  Result: {result}")
 
     def menu(self):
+        if int(self.env.auto_run):
+            self.build = self.builds["25"]
+            self.run_sanity_suite()
+            return
+
         print("\n" + "=" * 90)
         print("                 IDEVSUTIL QA AUTOMATION CONSOLE")
         print("=" * 90)
@@ -560,6 +590,8 @@ class Console:
     def run(self):
         while True:
             self.menu()
+            if int(self.env.auto_run):
+                return
             c = input("QA > ").strip().lower()
             try:
                 if c == "0":

@@ -281,7 +281,7 @@ class SearchSuite:
 
         test_id = f"SIMPLE-SEARCH-{v:03d}"
 
-        out = self.tool.run(args, log_name)
+        out = self.tool.run(args, log_name, isMultiple_device_id=True)
         # details = out.get("stderr", "").strip()
         details = out.get("stdout", "").strip()  # if details == "" else details
 
@@ -300,7 +300,9 @@ class SearchSuite:
         if filesOnly and not foldersOnly:
             files = True
             folders = False
-
+        # sql_stmt = (
+        #     f"SELECT * FROM ibtable WHERE computer_id = {self.tool.env.device_id}"
+        # )
         all_items_ibtable = self.db.get_all(table="ibtable", findAll=True)
 
         if folders:
@@ -675,36 +677,51 @@ class SearchSuite:
 
         return toDelete
 
-    def move_to_original(self, to_move: list[str], v: int):
+    def move_to_original(self, v: int, seed: int = 1234):
+        deleted_items = self.db.get_all(table="trash")
+        to_move = []
+        rng = random.Random(seed)
+
+        choice = rng.choice(deleted_items)
+
+        path = self.db.get_path_by_uid(
+            choice["uid"], table="trash", parent_id_ibtable=choice["parent_id_ibtable"]
+        )
+        if not int(choice["is_folder"]) and path is not None:
+            path = path.rstrip("/")
+        if path is not None:
+            to_move.append(path)
+
         fl: Path = self.run_dir / "MTO_list.txt"
         with fl.open("w", encoding="utf-8") as f:
             for path in to_move:
                 f.writelines(path + "\n")
+
         r = self.tool.move_to_original(
             isSuiteRunning=True, filelist=str(fl), name=f"move_to_original_{v}"
         )
-        if r is not None:
+        if r is not None and self.db is not None:
             details = r.get("stdout", "").strip()  # if details == "" else details
 
             itemsDeletedWithServerRoot = self._extract_fname(details)
             itemsDeletedWithoutServerRoot: set[str] = set()
-            for path in to_move:
-                movedItem = self.db.get_by_path_new(path=path, isRegularFile=1)
-                self.db.restore_subtree_from_trash(uid=movedItem["uid"])
+            itemsSupposedToBeMoved: set[str] = set()
+            self.db.restore_subtree_from_trash(uid=choice["uid"])
 
-            trash_items = self.db.get_all(table="trash")
+            children = self.db.list_children(choice["uid"])
 
-            for item in trash_items:
-                path = self.db.get_path_by_uid(
-                    item["uid"],
-                    table="trash",
-                    parent_id_ibtable=item["parent_id_ibtable"],
-                )
+            if int(choice["is_folder"]):
+                path = self.db.get_path_by_uid(choice["uid"])
+                if path is not None:
+                    itemsSupposedToBeMoved.add(path)
+
+            for item in children:
+                path = self.db.get_path_by_uid(item["uid"])
 
                 if path is not None:
                     if not bool(item["is_folder"]):
                         path = path.rstrip("/")
-                    itemsSupposedToBeDeleted.add(path)
+                    itemsSupposedToBeMoved.add(path)
 
             if int(self.tool.env.dedup) == 1:
                 for item in itemsDeletedWithServerRoot:
@@ -718,14 +735,14 @@ class SearchSuite:
                 else itemsDeletedWithServerRoot
             )
 
-            for item in itemsSupposedToBeDeleted:
+            for item in itemsSupposedToBeMoved:
                 try:
                     itemsToCompare.remove(item)
-                except:
-                    print("Key Not found: ", item)
+                except Exception as e:
+                    print(f"Key Not found: {e}", item)
 
             result = {
-                "expected": len(itemsSupposedToBeDeleted),
+                "expected": len(itemsSupposedToBeMoved),
                 "passed": False,
                 "actual": len(itemsDeletedWithServerRoot),
             }
@@ -733,8 +750,8 @@ class SearchSuite:
             if len(itemsToCompare) == 0:
                 result["passed"] = True
 
-            test_id = f"SEARCH-{v:03d}"
-            description = "Delete Item"
+            test_id = f"MOVE-TO-ORIGINAL-{v:03d}"
+            description = "Move to Original from trash"
 
             self._record(
                 test_id=test_id,
@@ -776,7 +793,7 @@ class SearchSuite:
 
         deletedItemsToMatch = self.delete_items(v=5, seed=12022024)
 
-        time.sleep(5)
+        # time.sleep(5)
 
         self.search_trash(
             toBeMatched=set(deletedItemsToMatch), v=6, expected=len(deletedItemsToMatch)
@@ -784,13 +801,15 @@ class SearchSuite:
 
         deletedItemsToMatch = self.delete_items(v=7, seed=14011986)
 
-        time.sleep(5)
+        # time.sleep(5)
 
         self.search_trash(
             toBeMatched=set(deletedItemsToMatch), v=8, expected=len(deletedItemsToMatch)
         )
 
         self.search_recent_files(v=9, recent=10)
+
+        self.move_to_original(v=10)
 
         # self.search_all()
         # self.search_file_index64()

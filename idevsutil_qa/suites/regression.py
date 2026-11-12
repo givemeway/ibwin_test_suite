@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+import concurrent.futures
+import threading
 import csv
 import json
 import os
@@ -26,6 +27,7 @@ from ..utils import (
     get_splits_and_blocks_to_modify,
     info,
     insert_data,
+    log_to_file,
     mutate_cbt_files,
     mutate_files,
     print_cbt_info_considered,
@@ -47,7 +49,10 @@ BLOCK_SIZE = 1024 * 32
 BLOCKS_IN_SPLIT = SPLIT_SIZE // BLOCK_SIZE
 TOTAL_VERSIONS = 5
 SPLIT_COUNT = 7
-TOTAL_RUNS = 2
+TOTAL_RUNS = 5
+RETRY_ATTEMPTS = 100
+FILES_IN_WORKER = 1000
+MAX_WORKERS = 100
 
 
 class Regression:
@@ -66,6 +71,10 @@ class Regression:
         self.filename = filename
         self.label = label if label != "" else root.name
 
+        self.tls_value = self.tool.env.use_tls
+        self.port_value = self.tool.env.port
+        self.executable = self.tool.build.executable
+
         self.source = root / "source"
         self.split_source = root / "split_source"
         self.cbt_source = root / "cbt_source"
@@ -81,6 +90,11 @@ class Regression:
         self.restored = root / "restored"
         self.split_restored = root / "split_restored"
         self.cbt_restored = root / "cbt_restored"
+
+        self.chunk_size = FILES_IN_WORKER
+        self.total_workers = MAX_WORKERS
+        self.lock = threading.Lock()
+        self.cooldown_seconds = 1
 
         for d in (
             self.source.parent,
@@ -109,10 +123,29 @@ class Regression:
         self.split_bkp_syntax_path = "/home/sandeep/split_filelist.txt"
         self.split_rs_path = "/home/sandeep/split_restore"
 
-    def add(self, tid, desc, status, expected, actual, build, details="", duration=""):
+    def add(
+        self,
+        tid,
+        desc,
+        status,
+        expected,
+        actual,
+        build,
+        details="",
+        duration="",
+        retry="0",
+    ):
         self.results.append(
             Result(
-                tid, desc, status, expected, actual, build, details, duration=duration
+                tid,
+                desc,
+                status,
+                expected,
+                actual,
+                build,
+                details,
+                duration=duration,
+                retry=retry,
             )
         )
         print(f"[{status}] {tid} - {desc}")
@@ -123,27 +156,60 @@ class Regression:
         )
 
     def _create_bucket(self, isSuiteRunning) -> dict[str, str] | str:
-        print("#" * 90)
-        print("Creating Bucket")
-        print("#" * 90)
-        out = self.tool.create_bucket(isSuiteRunning)
-        print("Bucket Created : ", out["stdout"])
-        print("-" * 90)
-        pattern = r'device_id="([^"]*)"'
-        pattern2 = r'server_root="([^"]*)"'
-        uid = re.findall(pattern, out["stdout"])
-        server_root = re.findall(pattern2, out["stdout"])
-        deviceID = ""
-        compID = ""
-        if uid and server_root:
-            deviceID = "5c0b" + uid[0].strip() + "4b5z"
-            compID = server_root[0].strip()
-            print("DeviceID: ", deviceID)
-            print("COMPID: ", compID)
-            return {"device_id": deviceID, "server_root": compID}
-        else:
-            print("Unable to retrieve device ID ", out)
-            return ""
+        retry_attempts = RETRY_ATTEMPTS
+
+        for attempt in range(1, retry_attempts + 1):
+            print("#" * 90)
+            print(f"creating bucket (attempt {attempt}/{retry_attempts})")
+            print("#" * 90)
+
+            out = self.tool.create_bucket(isSuiteRunning)
+            print("bucket created : ", out["stdout"])
+            print("-" * 90)
+
+            pattern = r'device_id="([^"]*)"'
+            pattern2 = r'server_root="([^"]*)"'
+            uid = re.findall(pattern, out["stdout"])
+            server_root = re.findall(pattern2, out["stdout"])
+
+            if uid and server_root:
+                deviceid = "5c0b" + uid[0].strip() + "4b5z"
+                compid = server_root[0].strip()
+                print("deviceid: ", deviceid)
+                print("compid: ", compid)
+                return {"device_id": deviceid, "server_root": compid}
+            else:
+                print("unable to retrieve device id. retrying...")
+
+        raise ValueError("Unable to Create Bucket Exiting...")
+
+    # def _create_bucket(self, isSuiteRunning) -> dict[str, str] | str:
+    #     status = "FAIL"
+    #     retry_attempts = RETRY_ATTEMPTS
+    #     while status == "FAIL":
+    #         print("#" * 90)
+    #         print("Creating Bucket")
+    #         print("#" * 90)
+    #         out = self.tool.create_bucket(isSuiteRunning)
+    #         print("Bucket Created : ", out["stdout"])
+    #         print("-" * 90)
+    #         pattern = r'device_id="([^"]*)"'
+    #         pattern2 = r'server_root="([^"]*)"'
+    #         uid = re.findall(pattern, out["stdout"])
+    #         server_root = re.findall(pattern2, out["stdout"])
+    #         deviceID = ""
+    #         compID = ""
+    #         if uid and server_root:
+    #             deviceID = "5c0b" + uid[0].strip() + "4b5z"
+    #             compID = server_root[0].strip()
+    #             print("DeviceID: ", deviceID)
+    #             print("COMPID: ", compID)
+    #             return {"device_id": deviceID, "server_root": compID}
+    #         else:
+    #             print("Unable to retrieve device ID Retrying...")
+    #             retry_attempts -= 1
+    #         if retry_attempts == 0:
+    #             raise ValueError("Unable to Create Bucket Exiting...")
 
     def _validate_test_backup(
         self,
@@ -209,65 +275,261 @@ class Regression:
         else:
             return
 
-    def backup_stat(self, compID, deviceID, use_tls: bool = True):
-        paths = get_all_files_from_list(list_file_path=Path(self.tool.env.fileListPath))
-        meta = PathMetadata()
-
+    def toggle_tls(self, use_tls: bool):
         if use_tls:
-            self.tool.env.use_tls = 1
             self.tool.env.port = 8443
+            self.tool.build.executable = self.executable + "_tls"
         else:
-            self.tool.env.use_tls = 0
             self.tool.env.port = 443
+            self.tool.build.executable = self.executable + "_no_tls"
 
-        for i in range(1, TOTAL_RUNS + 1):
-            fl = self.tool.env.fileListPath
-            args = []
-            args.append("--xml-output")
-            args.append("--type")
-            args.append("--add-progress")
-            args.append(f"--files-from={fl}")
-            args.append("/")
-            backup_loc = f"/5GB_with_tls_run_{i}/"
-            if not use_tls:
-                backup_loc = f"/5GB_without_tls_run_{i}/"
+    def reset_tls(self):
+        self.tool.env.use_tls = self.tls_value
+        self.tool.env.port = self.port_value
+        self.tool.build.executable = self.executable
 
-            args.append(self.tool.remote(backup_loc))
-            r = self.tool.run(args, f"backup_stat_{i}")
+    def reset_port_executable(self):
+        pass
 
+    def process_batch(
+        self,
+        idx: int,
+        chunk: list[str],
+        link_folder_path: Path,
+        use_tls: bool,
+        run: int,
+    ):
+        link_backup_list = str(link_folder_path.joinpath(f"chunk_{idx}"))
+
+        # db: FileTreeDatabase = FileTreeDatabase()
+
+        with Path(link_backup_list).open("w", encoding="utf-8") as f:
+            for file in chunk:
+                f.writelines(file.strip() + "\n")
+
+        # with self.lock:
+        #     meta = PathMetadata()
+        #     deviceID = ""
+        #     compID = ""
+        #     if status == "PASS":
+        #         for file in chunk:
+        #             abs_path = Path(backup_loc).joinpath(str(file).lstrip("/"))
+        #             self.update_versioned_files_in_db(
+        #                 v=1,
+        #                 meta=meta,
+        #                 file=abs_path,
+        #                 deviceID=deviceID,
+        #                 compID=compID,
+        #                 is_relative=True,
+        #                 relPath=str(file),
+        #                 db=db,
+        #             )
+        #         if db is not None:
+        #             db.close()
+
+        args = []
+        args.append("--xml-output")
+        args.append("--type")
+        args.append("--add-progress")
+        args.append(f"--files-from={link_backup_list}")
+        args.append("/")
+        backup_loc = f"/with_tls_run_{run}/"
+        backup_name = "with_tls"
+        tc_name = f"BACKUP-WITH-TLS-{run}"
+        desc = f"Backup-with-tls-chunk-{idx}-run-{run}"
+        if not use_tls:
+            backup_loc = f"/without_tls_run_{run}/"
+            backup_name = "without_tls"
+            tc_name = f"BACKUP-WITHOUT-TLS-{run}"
+            desc = f"Backup-without-tls-chunk-{idx}-run-{run}"
+
+        args.append(self.tool.remote(backup_loc))
+
+        status = "FAIL"
+        retry_attempts = RETRY_ATTEMPTS
+        retry = 0
+        while status == "FAIL":
+            r = self.tool.run(args, f"{backup_name}_backup_chunk_{idx}_run_{run}")
+            status = "FAIL"
             if r is not None:
                 status = "PASS" if int(r["return_code"]) == 0 else "FAIL"
-                tc_name = "BACKUP-5GB-FILE-WITH-TLS"
-                desc = f"Backup-5GB-File-with-tls-run-{i}"
+            if status == "FAIL" and retry_attempts > 0:
+                print(f"Retrying the chunk {idx}...")
+                retry_attempts -= 1
+                retry += 1
+                continue
+            self.add(
+                tid=tc_name,
+                desc=desc,
+                status=status,
+                expected="",
+                actual="",
+                build=self.tool.build.name,
+                details=f"Chunk {idx} | Run {run} | Retries : {retry}",
+                duration=r.get("duration") if r is not None else "0",
+                retry=str(retry),
+            )
+            break
 
-                if status == "PASS":
-                    for file in paths:
-                        abs_path = Path(backup_loc).joinpath(str(file).lstrip("/"))
-                        print("Abs_path: ", abs_path)
-                        self.update_versioned_files_in_db(
-                            v=1,
-                            meta=meta,
-                            file=abs_path,
-                            deviceID=deviceID,
-                            compID=compID,
-                            is_relative=True,
-                            relPath=str(file),
-                        )
+        return status == "PASS"
 
-                if not use_tls:
-                    tc_name = "BACKUP-5GB-FILE-WITHOUT-TLS"
-                    desc = f"Backup-5GB-File-without-tls-run-{i}"
+        # time.sleep(1)
+        # r = self.tool.run(args, f"{backup_name}_sync_chk_backup_chunk_{idx}_run_{run}")
+        #
+        # with self.lock:
+        #     if r["return_code"] != 0:
+        #         self.add(
+        #             tid=tc_name,
+        #             desc=desc,
+        #             status=status,
+        #             expected="",
+        #             actual="",
+        #             build=self.tool.build.name,
+        #             details="",
+        #             duration=r["duration"],
+        #         )
 
-                self.add(
-                    tid=tc_name,
-                    desc=desc,
-                    status=status,
-                    expected="",
-                    actual="",
-                    build=self.tool.build.name,
-                    details="",
-                    duration=r["duration"],
+        # time.sleep(1)
+        # r = self.tool.run(args=args, name=f"backup_chunk_{idx}_run_{run}")
+        #
+
+    def parallel_backup(
+        self,
+        link_file_path: Path,
+        isSuiteRunning: bool = False,
+        create_report: bool = False,
+        use_tls: bool = True,
+        run: int = 1,
+    ):
+
+        link_file_paths: list[str] = []
+        link_folder_path: Path
+        fl = link_file_path
+
+        with fl.open("r", encoding="utf-8") as f:
+            link_file_paths = [line.strip("\n") for line in f if line.strip()]
+
+        formatted_list = list(link_file_paths)
+
+        try:
+            link_folder_path = self.root.joinpath("chunk_file_list")
+            if not link_folder_path.exists():
+                link_folder_path.mkdir(exist_ok=True, parents=True)
+        except Exception as e:
+            print("Error: ", e)
+            return
+
+        chunks = [
+            formatted_list[i : i + self.chunk_size]
+            for i in range(0, len(formatted_list), self.chunk_size)
+        ]
+
+        self.workers = min(self.total_workers, len(chunks))
+
+        for wave_start in range(0, len(chunks), self.workers):
+            wave_chunks = chunks[wave_start : wave_start + self.workers]
+            print(
+                f"\n--- Starting Wave: Batches {wave_start + 1} to {wave_start + len(wave_chunks)} ---"
+            )
+            success = True
+            # run up to chunks concurrently
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(wave_chunks)
+            ) as executor:
+                future_to_idx = {}
+                for offset, chunk in enumerate(wave_chunks):
+                    idx = wave_start + offset + 1
+                    future = executor.submit(
+                        self.process_batch,
+                        idx,
+                        chunk,
+                        link_folder_path,
+                        use_tls,
+                        run,
+                    )
+                    future_to_idx[future] = idx
+
+                # Wait for all concurrent chunks to finish before moving on to next batch of  chunks
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    res = future.result()
+                    if res is False:
+                        success = False
+
+            if not success:
+                print(f"Batch {wave_start + 1} failed..")
+                # return False
+
+            # sleep for few seconds before sending next set of chunk batches
+            if wave_start + self.workers < len(chunks):
+                print(
+                    f"Wave complete. Cooling down for {self.cooldown_seconds} seconds before the next concurrent chunk batch..."
                 )
+            time.sleep(self.cooldown_seconds)
+
+        # if create_report or not isSuiteRunning:
+        #     self.finish()
+
+    def backup_stat(self, compID, deviceID, use_tls):
+        paths = get_all_files_from_list(list_file_path=Path(self.tool.env.fileListPath))
+        fl = self.root / "filelist.txt"
+        with fl.open("w", encoding="utf-8") as f:
+            for file in paths:
+                f.writelines(str(file) + "\n")
+
+        for i in range(1, TOTAL_RUNS + 1):
+            self.parallel_backup(link_file_path=fl, use_tls=use_tls, run=i)
+
+        # meta = PathMetadata()
+
+        # for i in range(1, TOTAL_RUNS + 1):
+        #     fl = self.tool.env.fileListPath
+        #     args = []
+        #     args.append("--xml-output")
+        #     args.append("--type")
+        #     # args.append("--add-progress")
+        #     args.append(f"--files-from={fl}")
+        #     args.append("/")
+        #     backup_loc = f"/with_tls_run_{i}/"
+        #     backup_name = "with_tls"
+        #     tc_name = "BACKUP-WITH-TLS"
+        #     desc = f"Backup-with-tls-run-{i}"
+        #     if not use_tls:
+        #         backup_loc = f"/without_tls_run_{i}/"
+        #         backup_name = "without_tls"
+        #         tc_name = "BACKUP-WITHOUT-TLS"
+        #         desc = f"Backup-without-tls-run-{i}"
+        #
+        #     args.append(self.tool.remote(backup_loc))
+        #
+        #     r = self.tool.run(args, f"{backup_name}_backup_{i}")
+        #
+        #     if r is not None:
+        #         status = "PASS" if int(r["return_code"]) == 0 else "FAIL"
+        #
+        #         if status == "PASS":
+        #             for file in paths:
+        #                 abs_path = Path(backup_loc).joinpath(str(file).lstrip("/"))
+        #                 print("Abs_path: ", abs_path)
+        #                 self.update_versioned_files_in_db(
+        #                     v=1,
+        #                     meta=meta,
+        #                     file=abs_path,
+        #                     deviceID=deviceID,
+        #                     compID=compID,
+        #                     is_relative=True,
+        #                     relPath=str(file),
+        #                 )
+        #
+        #         self.add(
+        #             tid=tc_name,
+        #             desc=desc,
+        #             status=status,
+        #             expected="",
+        #             actual="",
+        #             build=self.tool.build.name,
+        #             details="",
+        #             duration=r["duration"],
+        #         )
 
     def _copy_snapshot(
         self, v: int, files: list[Path], files_source: Path, files_snapshot: Path
@@ -314,21 +576,26 @@ class Regression:
         except Exception as e:
             print("_copy_snapshot: ", e)
 
-    def backup(self, v, files: list[Path] = []):
-        fl = self.lists / f"backup_V{v:03d}.txt"
+    def backup(self, v, files: list[Path] = [], use_tls: bool = True):
+
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+        fl = self.lists / f"{tls_name}_backup_V{v:03d}.txt"
+
         with open(str(fl), "w", encoding="utf-8") as f:
             for file in files:
                 f.writelines(str(file) + "\n")
 
         r = self.tool.upload(
             fl,
-            f"backup_V{v:03d}",
+            f"{tls_name}_backup_V{v:03d}",
             label=self.label,
         )
         if r is None:
             return False
 
-        tc_name = "REGULAR-FILE-BACKUP"
+        tc_name = f"{tls_name}_REGULAR-FILE-BACKUP"
         desc = f"{'Incremental' if v > 1 else 'FULL'} - backup -  IBVER{v:03d}"
         if r["return_code"] != 0:
             self.add(
@@ -367,6 +634,7 @@ class Regression:
         original_files_dict: dict[str, Any] = {},
         isCBT: bool = False,
         duration: str = "",
+        use_tls: bool = True,
     ):
         restored: list[Path] = []
 
@@ -504,11 +772,15 @@ class Regression:
             except Exception as e:
                 print("ERROR IN Restore validation: ", e)
 
-        tc_name = "REGULARFILE-RESTORE-VALIDATION"
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+
+        tc_name = f"{tls_name}_REGULARFILE-RESTORE-VALIDATION"
         if isCBT:
-            tc_name = "CBT-RESTORE-VALIDATION"
+            tc_name = f"{tls_name}_CBT-RESTORE-VALIDATION"
         if bool(isRegularFile):
-            tc_name = "SPLIT-RESTORE-VALIDATION"
+            tc_name = f"{tls_name}_SPLIT-RESTORE-VALIDATION"
 
         self.add(
             tc_name,
@@ -522,9 +794,17 @@ class Regression:
 
         return stats
 
-    def restore_version(self, v, files: list[Path], isBuildSame=True):
+    def restore_version(
+        self, v, files: list[Path], isBuildSame=True, use_tls: bool = True
+    ):
+
         # <source path>_IBVER001, <source path>_IBVER002, ...
-        fl = self.lists / f"restore_V{v:03d}.txt"
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+
+        fl = self.lists / f"{tls_name}_restore_V{v:03d}.txt"
+
         with open(str(fl), "w", encoding="utf-8") as f:
             for file in files:
                 posix_path = Path(file).as_posix()
@@ -536,11 +816,11 @@ class Regression:
         dest = self.restored / f"V{v:03d}"
 
         dest.mkdir(parents=True, exist_ok=True)
-        r = self.tool.restore(fl, dest, f"restore_V{v:03d}", isBuildSame)
+        r = self.tool.restore(fl, dest, f"{tls_name}_restore_V{v:03d}", isBuildSame)
         if r is not None:
             status = "PASS" if r["return_code"] == 0 else "FAIL"
             self.add(
-                tid="REGULAR-FILE-RESTORE",
+                tid=f"{tls_name}_REGULAR-FILE-RESTORE",
                 desc=f"Regular File Restore - IBVER{v:3d}",
                 status=status,
                 expected="-",
@@ -575,7 +855,7 @@ class Regression:
                 snap = Path(snap)
             snapFiles.append(snap)
 
-        return self.validate_restore(dest, snapFiles, v)
+        return self.validate_restore(dest, snapFiles, v, use_tls=use_tls)
 
     def validate_versions(
         self,
@@ -680,7 +960,14 @@ class Regression:
 
         return paths
 
-    def upload_get_ordered_file_paths(self, v, files) -> list[Path]:
+    def upload_get_ordered_file_paths(
+        self, v, files, use_tls: bool = True
+    ) -> list[Path]:
+
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+
         out = self.backup(v, files)
 
         if out is None:
@@ -720,6 +1007,7 @@ class Regression:
         is_Regular_file: int = 1,
         is_relative: bool = False,
         relPath: str = "",
+        db: FileTreeDatabase | None = None,
     ):
         file_path = meta._to_pure_posix(file)
 
@@ -736,6 +1024,9 @@ class Regression:
         #
         # except Exception as e:
         #     print("e -->< ", e)
+        db_thread = self.db
+        if db is not None:
+            db_thread = db
 
         if v == 1:
             actual_file = Path(file)
@@ -744,7 +1035,8 @@ class Regression:
 
             metadata[file_path]["checksum"] = sha256(actual_file)
             metadata[file_path]["vernum"] = 1
-            self.db.insert_path(
+
+            db_thread.insert_path(
                 file_path,
                 pathProperties=metadata,
                 device_id=deviceID,
@@ -753,7 +1045,7 @@ class Regression:
             )
         else:
             # record = self.db.get_by_path(file_path)
-            record = self.db.get_by_path_new(
+            record = db_thread.get_by_path_new(
                 file_path,
                 isRegularFile=is_Regular_file,
                 computer_id=compID,
@@ -768,19 +1060,22 @@ class Regression:
                     v=v,
                     isRegularFile=is_Regular_file,
                 )
-                if self.db is not None:
-                    self.db.update(data["uid"], data["record"])
-                    self.db.insert_version_record(data["version"])
+                if db_thread is not None:
+                    db_thread.update(data["uid"], data["record"])
+                    db_thread.insert_version_record(data["version"])
 
-    def cbt_backup(self, v: int, files: list[Path], cbt_info):
+    def cbt_backup(self, v: int, files: list[Path], cbt_info, use_tls: bool = True):
         all_files: list[Path] = files
+        tls_name = "tls"
 
+        if not use_tls:
+            tls_name = "no_tls"
         if len(all_files) == 0:
             all_files = get_all_files_from_list(self.tool.env.fileListPath)
 
         origin_files_to_split: dict[str, Any] = {}
 
-        fl = self.cbt_lists / f"cbt_{v:03d}_sync_check.txt"
+        fl = self.cbt_lists / f"{tls_name}_cbt_{v:03d}_sync_check.txt"
         split_count = 0
 
         for i, file in enumerate(all_files):
@@ -799,16 +1094,22 @@ class Regression:
                     mdt = f["mdt"]
                     self.add_file(name=name, checksum=checksum, size=size, mdt=mdt)
 
-        file_csv = self.cbt_source / f"cbt_split_info_{v:03d}.json"
+        file_csv = self.cbt_source / f"{tls_name}_cbt_split_info_{v:03d}.json"
 
         self.write_file_info(file_csv)
+        session = self.sync_check(str(fl), v=v, isCBT=True, use_tls=use_tls)
 
-        session = self.sync_check(str(fl), v=v, isCBT=True)
-
-        fl = self.cbt_lists / f"cbt_{v:03d}_split_backup.txt"
+        fl = self.cbt_lists / f"{tls_name}_cbt_{v:03d}_split_backup.txt"
+        print("fl after cbt_lists: ", fl)
+        print(
+            "self.cbt_list: ",
+            self.cbt_lists,
+            "  ",
+            self.cbt_lists / f"{tls_name}_cbt_{v:03d}_split_backup.txt",
+        )
 
         ordered_file_paths: list[Path] = []
-
+        print("fl before: ", fl)
         if session is not None:
             ordered_file_paths = self._split_backup(
                 session=session,
@@ -817,9 +1118,10 @@ class Regression:
                 v=v,
                 isCBT=True,
                 cbt_info=cbt_info,
+                use_tls=use_tls,
             )
 
-            fl = self.cbt_lists / f"cbt_{v:03d}_send_meta.txt"
+            fl = self.cbt_lists / f"{tls_name}_cbt_{v:03d}_send_meta.txt"
 
             self._send_split_metadata(
                 original_files_to_split=origin_files_to_split,
@@ -828,6 +1130,7 @@ class Regression:
                 fl=fl,
                 v=v,
                 isCBT=True,
+                use_tls=use_tls,
             )
             self._copy_snapshot(
                 v=v,
@@ -839,6 +1142,265 @@ class Regression:
             "origin_files_to_split": origin_files_to_split,
             "ordered_file_paths": ordered_file_paths,
         }
+
+    def run_backup_test(
+        self,
+        files: list[Path],
+        split_files: list[Path],
+        cbt_files: list[Path],
+        link_files: list[Path],
+        use_tls: bool,
+    ):
+        compID = self.tool.env.server_root
+        deviceID = self.tool.env.device_id
+        if int(self.tool.env.dedup):  # and not self.tool.env.device_id:
+            data = self._create_bucket(True)
+            deviceID = data.get("device_id", "")
+            compID = data.get("server_root", "")
+            if deviceID != "" and compID != "":
+                self.tool.env.device_id = deviceID
+                self.tool.env.server_root = compID
+        print("+" * 90)
+        print("compID: ", compID)
+        print("deviceID: ", deviceID)
+        print("+" * 90)
+
+        # self.toggle_tls(use_tls=use_tls)
+
+        # meta = PathMetadata()
+        # # 1. CBT Backup
+        # if int(self.tool.env.dedup):
+        #     origin_files_to_split = {}
+        #
+        #     for v in range(1, TOTAL_VERSIONS + 1):
+        #         cbt_info = mutate_cbt_files(v=v, files=cbt_files, size=1024 * 1024 * 1)
+        #         out = self.cbt_backup(
+        #             v, files=cbt_files, cbt_info=cbt_info, use_tls=use_tls
+        #         )
+        #
+        #         origin_files_to_split = out["origin_files_to_split"]
+        #
+        #         ordered_file_paths = out["ordered_file_paths"]
+        #
+        #         for file in ordered_file_paths:
+        #             self.update_versioned_files_in_db(
+        #                 v, meta, file, deviceID, compID, is_Regular_file=0
+        #             )
+        #
+        #     # 2. CBT - Restore and validate restores
+        #     stats = {}
+        #
+        #     for v in range(1, TOTAL_VERSIONS + 1):
+        #         batch_stat = self.split_restore(
+        #             original_files=origin_files_to_split,
+        #             v=v,
+        #             split_count=2,
+        #             isCBT=True,
+        #             use_tls=use_tls,
+        #         )
+        #         for k, v in batch_stat.items():
+        #             if k in stats:
+        #                 stats[k].append(v)
+        #             else:
+        #                 stats[k] = [v]
+        #
+        #     # 2 a) verify cbt file versions
+        #
+        #     for path in origin_files_to_split.keys():
+        #         file = Path(path)
+        #         r = self.tool.version_info(
+        #             True, rp=file, isRegularFile=0, isCBT=True, use_tls=use_tls
+        #         )
+        #         if r is None:
+        #             return
+        #         isVerified = self.validate_versions(
+        #             out=r["stdout"],
+        #             remotepath=str(file),
+        #             uploadedStats=stats,
+        #             isRegularFile=0,
+        #             isCBT=True,
+        #         )
+        #         self.add(
+        #             f"{'tls' if use_tls else 'no_tls'}_CBT-VERSION-HISTORY",
+        #             f"Retrieve & Verify version history of CBT file - {file.name}",
+        #             "PASS" if isVerified else "FAIL",
+        #             f"Version-info of {file.name} succeeds",
+        #             str(r["return_code"]),
+        #             r["stderr"],
+        #             f"Build: {self.tool.build.name}",
+        #             r["duration"],
+        #         )
+        #         try:
+        #             os.unlink(path)
+        #             for p in file.parent.rglob("*_[0-9][0-9][0-9][0-9]"):
+        #                 if p.is_file():
+        #                     os.unlink(str(p))
+        #         except Exception as e:
+        #             print(e)
+        #
+        #     self.validate_backup(
+        #         isRegularFile=0,
+        #         module=f"{'tls' if use_tls else 'no_tls'}_CBT-AUTH-LIST",
+        #     )
+        #
+        #     # 3. Split Backup
+        #     origin_files_to_split = {}
+        #
+        #     for v in range(1, TOTAL_VERSIONS + 1):
+        #         mutate_files(v=v, files=split_files, size=1234)
+        #         out = self.split_backup(
+        #             v=v, files=split_files, split_count=7, use_tls=use_tls
+        #         )
+        #         origin_files_to_split = out["origin_files_to_split"]
+        #         ordered_file_paths = out["ordered_file_paths"]
+        #         for file in ordered_file_paths:
+        #             self.update_versioned_files_in_db(
+        #                 v, meta, file, deviceID, compID, is_Regular_file=0
+        #             )
+        #         time.sleep(2)
+        #
+        #     # 4. Validate Split & CBT backups
+        #     self.validate_backup(
+        #         isRegularFile=0,
+        #         module=f"{'tls' if use_tls else 'no_tls'}_SPLIT-AUTH-LIST",
+        #         use_tls=use_tls,
+        #     )
+        #
+        #     # 5. Split Restore and validate restores
+        #     stats = {}
+        #
+        #     for v in range(1, TOTAL_VERSIONS + 1):
+        #         batch_stat = self.split_restore(
+        #             original_files=origin_files_to_split,
+        #             v=v,
+        #             split_count=SPLIT_COUNT,
+        #             use_tls=use_tls,
+        #         )
+        #         for k, v in batch_stat.items():
+        #             if k in stats:
+        #                 stats[k].append(v)
+        #             else:
+        #                 stats[k] = [v]
+        #         time.sleep(2)
+        #
+        #     # 6. split version info validation
+        #     for path in origin_files_to_split.keys():
+        #         file = Path(path)
+        #         r = self.tool.version_info(
+        #             True, rp=file, isRegularFile=0, use_tls=use_tls
+        #         )
+        #         if r is None:
+        #             return
+        #         isVerified = self.validate_versions(
+        #             out=r["stdout"],
+        #             remotepath=str(file),
+        #             uploadedStats=stats,
+        #             isRegularFile=0,
+        #         )
+        #         self.add(
+        #             f"{'tls' if use_tls else 'no_tls'}_SPLIT-VERSION-HISTORY",
+        #             f"Retrieve & Verify version history - {file.name}",
+        #             "PASS" if isVerified else "FAIL",
+        #             f"Version-info of {file.name} succeeds",
+        #             str(r["return_code"]),
+        #             r["stderr"],
+        #             f"Build: {self.tool.build.name}",
+        #             r["duration"],
+        #         )
+        #         try:
+        #             for v in range(SPLIT_COUNT):
+        #                 suffix = f"_{v:04d}"
+        #                 file = path + suffix
+        #                 os.unlink(file)
+        #             os.unlink(file)
+        #         except Exception as e:
+        #             print(e)
+        #
+        # # 7. Regular file backup
+        # for v in range(1, TOTAL_VERSIONS + 1):
+        #     mutate_files(v=v, files=files, size=self.size_mb)
+        #
+        #     # self.tool.run(["killall", "idevsupdate"], name="sys_cmds")
+        #
+        #     uploadOrderedFiles = self.upload_get_ordered_file_paths(
+        #         v, files, use_tls=use_tls
+        #     )
+        #     # copy_tmp_dump(
+        #     #     self.root, Path(self.tool.env.userRoot), self.tool.env.username
+        #     # )
+        #     #
+        #     for file in uploadOrderedFiles:
+        #         self.update_versioned_files_in_db(v, meta, file, deviceID, compID)
+        #     # self.tool.run([self.updater_binary, "--daemon"], name="sys_cmds")
+        #
+        #     time.sleep(2)
+        #
+        # # 8. regular file backup validation
+        # self.validate_backup(use_tls=use_tls)
+        #
+        # print("-" * 90)
+        # print("\n Restore Build Selection")
+        # print("-" * 90)
+        # print("1. Same")
+        # print("2. Opposite")
+        # # selection = input(">").strip()
+        # isBuildSame: bool = True
+        # # if selection == "2":
+        # # isBuildSame = False
+        # # else:
+        # # isBuildSame = True
+        #
+        # # 9. Regular file restore & validation
+        # stats = {}
+        #
+        # for v in range(1, TOTAL_VERSIONS + 1):
+        #     batch_stat = self.restore_version(
+        #         v, self.files, isBuildSame, use_tls=use_tls
+        #     )
+        #     for k, v in batch_stat.items():
+        #         if k in stats:
+        #             stats[k].append(v)
+        #         else:
+        #             stats[k] = [v]
+        #
+        # # 10. regular file version info validation
+        #
+        # for file in files:
+        #     r = self.tool.version_info(True, rp=file, use_tls=use_tls)
+        #     if r is None:
+        #         return
+        #     isVerified = self.validate_versions(r["stdout"], str(file), stats)
+        #     self.add(
+        #         f"{'tls' if use_tls else 'no_tls'}_REGULAR-FILE-VERSION-HISTORY",
+        #         f"Retrieve & Verify version history - {file.name}",
+        #         "PASS" if isVerified else "FAIL",
+        #         f"Version-info of {file.name} succeeds",
+        #         str(r["return_code"]),
+        #         r["stderr"],
+        #         f"Build: {self.tool.build.name}",
+        #         r["duration"],
+        #     )
+        #     try:
+        #         os.unlink(str(file))
+        #     except Exception as e:
+        #         print(e)
+
+        # 11 Backup Stat - 5 GB
+
+        self.backup_stat(compID=compID, deviceID=deviceID, use_tls=use_tls)
+
+        # 11 Backup Stat - 5 GB - without TLS
+        # self.toggle_tls(use_tls=False)
+        #
+        # self.backup_stat(compID=compID, deviceID=deviceID, use_tls=False)
+
+        # self.reset_tls()
+
+        # self.tool.toogleBuild(False)
+        # if not isBuildSame:
+        #     self.tool.resetBuildToOriginal()
+
+        # self.tool.resetRegression()
 
     def run(
         self,
@@ -852,226 +1414,29 @@ class Regression:
         print("#" * 90)
 
         self.files = files
-        compID = self.tool.env.server_root
-        deviceID = self.tool.env.device_id
-        print("compID: ", compID)
-        print("deviceID: ", deviceID)
 
-        if int(self.tool.env.dedup) == 1 and not self.tool.env.device_id:
-            data = self._create_bucket(True)
-            deviceID = data.get("device_id", "")
-            compID = data.get("server_root", "")
-            if deviceID != "":
-                self.tool.env.device_id = deviceID
+        # self.run_backup_test(files, split_files, cbt_files, link_files, use_tls=False)
+        start = time.perf_counter()
+        self.run_backup_test(files, split_files, cbt_files, link_files, use_tls=True)
+        elapsed = time.perf_counter() - start
 
-        meta = PathMetadata()
+        passed = sum(r.status == "PASS" for r in self.results)
+        failed = sum(r.status == "FAIL" for r in self.results)
+        retries = sum(int(r.retry) for r in self.results)
+        self.add(
+            tid="BACKUP-RESULT",
+            desc=f"PASS = {passed} | FAIL = {failed} | retries = {retries}",
+            status="RESULT",
+            expected=passed + failed,
+            actual=passed,
+            build="",
+            details="",
+            duration=f"{elapsed:02f}",
+        )
 
-        # 1. CBT Backup
-        # origin_files_to_split = {}
-        #
-        # for v in range(1, TOTAL_VERSIONS + 1):
-        #     cbt_info = mutate_cbt_files(v=v, files=cbt_files, size=1024 * 1024 * 1)
-        #     out = self.cbt_backup(v, files=cbt_files, cbt_info=cbt_info)
-        #
-        #     origin_files_to_split = out["origin_files_to_split"]
-        #
-        #     ordered_file_paths = out["ordered_file_paths"]
-        #
-        #     for file in ordered_file_paths:
-        #         self.update_versioned_files_in_db(
-        #             v, meta, file, deviceID, compID, is_Regular_file=0
-        #         )
-        #
-        # # 2. CBT - Restore and validate restores
-        # stats = {}
-        #
-        # for v in range(1, TOTAL_VERSIONS + 1):
-        #     batch_stat = self.split_restore(
-        #         original_files=origin_files_to_split, v=v, split_count=2, isCBT=True
-        #     )
-        #     for k, v in batch_stat.items():
-        #         if k in stats:
-        #             stats[k].append(v)
-        #         else:
-        #             stats[k] = [v]
-        #
-        # # 2 a) verify cbt file versions
-        #
-        # for path in origin_files_to_split.keys():
-        #     file = Path(path)
-        #     r = self.tool.version_info(True, rp=file, isRegularFile=0, isCBT=True)
-        #     if r is None:
-        #         return
-        #     isVerified = self.validate_versions(
-        #         out=r["stdout"],
-        #         remotepath=str(file),
-        #         uploadedStats=stats,
-        #         isRegularFile=0,
-        #         isCBT=True,
-        #     )
-        #     self.add(
-        #         "CBT-VERSION-HISTORY",
-        #         f"Retrieve & Verify version history of CBT file - {file.name}",
-        #         "PASS" if isVerified else "FAIL",
-        #         f"Version-info of {file.name} succeeds",
-        #         str(r["return_code"]),
-        #         r["stderr"],
-        #         f"Build: {self.tool.build.name}",
-        #         r["duration"],
-        #     )
-        #     try:
-        #         os.unlink(path)
-        #         for p in file.parent.rglob("*_[0-9][0-9][0-9][0-9]"):
-        #             if p.is_file():
-        #                 os.unlink(str(p))
-        #     except Exception as e:
-        #         print(e)
-        #
-        # self.validate_backup(isRegularFile=0, module="CBT-AUTH-LIST")
-
-        # 3. Split Backup
-        origin_files_to_split = {}
-
-        for v in range(1, TOTAL_VERSIONS + 1):
-            mutate_files(v=v, files=split_files, size=1234)
-            out = self.split_backup(v=v, files=split_files, split_count=7)
-            origin_files_to_split = out["origin_files_to_split"]
-            ordered_file_paths = out["ordered_file_paths"]
-            for file in ordered_file_paths:
-                self.update_versioned_files_in_db(
-                    v, meta, file, deviceID, compID, is_Regular_file=0
-                )
-            time.sleep(2)
-
-        # 4. Validate Split & CBT backups
-        self.validate_backup(isRegularFile=0, module="SPLIT-AUTH-LIST")
-
-        # 5. Split Restore and validate restores
-        stats = {}
-
-        for v in range(1, TOTAL_VERSIONS + 1):
-            batch_stat = self.split_restore(
-                original_files=origin_files_to_split, v=v, split_count=SPLIT_COUNT
-            )
-            for k, v in batch_stat.items():
-                if k in stats:
-                    stats[k].append(v)
-                else:
-                    stats[k] = [v]
-            time.sleep(2)
-
-        # 6. split version info validation
-        for path in origin_files_to_split.keys():
-            file = Path(path)
-            r = self.tool.version_info(True, rp=file, isRegularFile=0)
-            if r is None:
-                return
-            isVerified = self.validate_versions(
-                out=r["stdout"],
-                remotepath=str(file),
-                uploadedStats=stats,
-                isRegularFile=0,
-            )
-            self.add(
-                "SPLIT-VERSION-HISTORY",
-                f"Retrieve & Verify version history - {file.name}",
-                "PASS" if isVerified else "FAIL",
-                f"Version-info of {file.name} succeeds",
-                str(r["return_code"]),
-                r["stderr"],
-                f"Build: {self.tool.build.name}",
-                r["duration"],
-            )
-            try:
-                for v in range(SPLIT_COUNT):
-                    suffix = f"_{v:04d}"
-                    file = path + suffix
-                    os.unlink(file)
-                os.unlink(file)
-            except Exception as e:
-                print(e)
-
-        # 7. Regular file backup
-        for v in range(1, TOTAL_VERSIONS + 1):
-            mutate_files(v=v, files=files, size=self.size_mb)
-
-            # self.tool.run(["killall", "idevsupdate"], name="sys_cmds")
-
-            uploadOrderedFiles = self.upload_get_ordered_file_paths(v, files)
-            # copy_tmp_dump(
-            #     self.root, Path(self.tool.env.userRoot), self.tool.env.username
-            # )
-            #
-            for file in uploadOrderedFiles:
-                self.update_versioned_files_in_db(v, meta, file, deviceID, compID)
-            # self.tool.run([self.updater_binary, "--daemon"], name="sys_cmds")
-
-            time.sleep(2)
-
-        # 8. regular file backup validation
-        self.validate_backup()
-
-        print("-" * 90)
-        print("\n Restore Build Selection")
-        print("-" * 90)
-        print("1. Same")
-        print("2. Opposite")
-        # selection = input(">").strip()
-        isBuildSame: bool = True
-        # if selection == "2":
-        # isBuildSame = False
-        # else:
-        # isBuildSame = True
-
-        # 9. Regular file restore & validation
-        stats = {}
-
-        for v in range(1, TOTAL_VERSIONS + 1):
-            batch_stat = self.restore_version(v, self.files, isBuildSame)
-            for k, v in batch_stat.items():
-                if k in stats:
-                    stats[k].append(v)
-                else:
-                    stats[k] = [v]
-
-        # 10. regular file version info validation
-
-        for file in files:
-            r = self.tool.version_info(True, rp=file)
-            if r is None:
-                return
-            isVerified = self.validate_versions(r["stdout"], str(file), stats)
-            self.add(
-                "REGULAR-FILE-VERSION-HISTORY",
-                f"Retrieve & Verify version history - {file.name}",
-                "PASS" if isVerified else "FAIL",
-                f"Version-info of {file.name} succeeds",
-                str(r["return_code"]),
-                r["stderr"],
-                f"Build: {self.tool.build.name}",
-                r["duration"],
-            )
-            try:
-                os.unlink(str(file))
-            except Exception as e:
-                print(e)
-        # 11 Backup Stat - 5 GB
-        self.backup_stat(compID=compID, deviceID=deviceID)
-
-        # 11 Backup Stat - 5 GB - without TLS
-        self.backup_stat(compID=compID, deviceID=deviceID, use_tls=False)
-
-        self.tool.env.use_tls = 1
-        self.tool.env.port = 8443
-
-        self.tool.toogleBuild(False)
-        if not isBuildSame:
-            self.tool.resetBuildToOriginal()
-
-        self.tool.resetRegression()
         return self.finish()
 
-    def sync_check(self, fl: str, v: int, isCBT: bool = False):
+    def sync_check(self, fl: str, v: int, isCBT: bool = False, use_tls: bool = True):
         # =======================
         # Command for sync-check:
         # =====================
@@ -1091,7 +1456,11 @@ class Regression:
             self.tool.remote(),
         ]
 
-        r = self.tool.run(args, f"sync_check_{v:03d}")
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+
+        r = self.tool.run(args, f"{tls_name}_sync_check_{v:03d}")
 
         result = "FAIL"
         sessionID: str | None = None
@@ -1107,17 +1476,15 @@ class Regression:
             session = list(set(sessions))
             sessionID = session[0]
             file_count = len(fnames)
-            print("sync-chk-filecount: ", file_count)
-            print("status: ", len(statuses))
             for fname, status in zip(fnames, statuses):
                 if status == "FAILURE":
                     file_count -= 1
 
             result = "PASS" if file_count == 0 else "FAIL"
 
-        tc_name = "SPLIT-BKP-SYNC-CHK"
+        tc_name = f"{tls_name}_SPLIT-BKP-SYNC-CHK"
         if isCBT:
-            tc_name = "CBT-BKP-SYNC-CHK"
+            tc_name = f"{tls_name}_CBT-BKP-SYNC-CHK"
 
         desc = f"Split Backup Sync Check-{v:03d}"
         if isCBT:
@@ -1174,7 +1541,7 @@ class Regression:
 
         return cbt_splits
 
-    def send_cbt_match(self, fl: Path, v: int):
+    def send_cbt_match(self, fl: Path, v: int, use_tls: bool = True):
         args = [
             "--xml-output",
             "--add-progress",
@@ -1185,14 +1552,18 @@ class Regression:
             self.tool.remote(),
             f"--split-size={SPLIT_SIZE}",
         ]
-        r = self.tool.run(args, f"cbt_send_match_{v:03d}")
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+        r = self.tool.run(args, f"{tls_name}_cbt_send_match_{v:03d}")
+
         result = "FAIL"
 
         if r is not None:
             result = "PASS" if r["return_code"] == 0 else "FAIL"
 
         self.add(
-            "CBT-MATCH",
+            f"{tls_name}_CBT-MATCH",
             f"Sending CBT Match splits-{v:03d}",
             f"{result}",
             "Match Split",
@@ -1210,6 +1581,7 @@ class Regression:
         v: int,
         isCBT: bool = False,
         cbt_info={},
+        use_tls: bool = True,
     ):
         # =======================
         # Command for split backup:
@@ -1222,17 +1594,21 @@ class Regression:
         # File input[Session Id will be obtained from sync check command]:
 
         cbt_splits = []
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
 
         if v > 1 and isCBT:
-            fl_match = self.cbt_lists / f"cbt_{v:03d}_match.txt"
+            fl_match = self.cbt_lists / f"{tls_name}_cbt_{v:03d}_match.txt"
+
             cbt_splits = self.prepare_cbt_and_match(
                 cbt_info=cbt_info,
                 v=v,
                 session=session,
                 fl=fl_match,
             )
-            self.send_cbt_match(fl=fl_match, v=v)
-
+            self.send_cbt_match(fl=fl_match, v=v, use_tls=use_tls)
+        print("fl_split_backup_2: ", fl)
         add_split_files_with_session(
             split_bkp_set_path=self.split_source if not isCBT else self.cbt_source,
             sessionID=session,
@@ -1243,6 +1619,8 @@ class Regression:
             cbt_splits=cbt_splits,
             v=v,
         )
+        print("fl_split_backup_3: ", fl)
+
         args = [
             "--xml-output",
             f"--files-from={fl}",
@@ -1255,9 +1633,9 @@ class Regression:
         if isCBT and v > 1:
             args.append("--cbt")
 
-        name = f"split_backup_{v:03d}"
+        name = f"{tls_name}_split_backup_{v:03d}"
         if isCBT:
-            name = f"cbt_split_backup_{v:03d}"
+            name = f"{tls_name}_cbt_split_backup_{v:03d}"
 
         r = self.tool.run(args, name)
         result = "FAIL"
@@ -1269,9 +1647,9 @@ class Regression:
                 output=r["stdout"], v=v
             )
 
-        tc_name = "SPLIT-SPLITBACKUP"
+        tc_name = f"{tls_name}_SPLIT-SPLITBACKUP"
         if isCBT:
-            tc_name = "CBT-SPLITBACKUP"
+            tc_name = f"{tls_name}_CBT-SPLITBACKUP"
 
         desc = f"CBT Backup After Sync Check-{v:03d}"
         if not isCBT:
@@ -1298,6 +1676,7 @@ class Regression:
         fl: Path,
         v: int,
         isCBT: bool = False,
+        use_tls: bool = True,
     ):
         # =======================
         # Command for Metadata-send:
@@ -1328,16 +1707,18 @@ class Regression:
             "--metadata-send",
             self.tool.remote(),
         ]
-
-        r = self.tool.run(args, f"split_send_metadata_{v:03d}")
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+        r = self.tool.run(args, f"{tls_name}_split_send_metadata_{v:03d}")
         result = "FAIL"
 
         if r is not None:
             result = "PASS" if r["return_code"] == 0 else "FAIL"
 
-        tc_name = "SPLIT-SEND-METADATA"
+        tc_name = f"{tls_name}_SPLIT-SEND-METADATA"
         if isCBT:
-            tc_name = "CBT-SEND-METADATA"
+            tc_name = f"{tls_name}_CBT-SEND-METADATA"
 
         desc = f"Split Backup Send Metadata-{v:03d}"
 
@@ -1357,7 +1738,9 @@ class Regression:
 
         return result == "PASS"
 
-    def split_receive_metadata(self, fl: Path, dst: str, v: int, isCBT: bool = False):
+    def split_receive_metadata(
+        self, fl: Path, dst: str, v: int, isCBT: bool = False, use_tls: bool = False
+    ):
         # Metadata-receive:
         # ==============
         # Input: /IDDriveImage/random_1gb_file1.bin_config.xml_IBVER001
@@ -1366,6 +1749,9 @@ class Regression:
         # --device-id=5c0bD017718384600007254654b5z --password-file=1234 --port=900 test1@localhost::home/
         # /home/IDdr/
         # --metadata-receive
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
         destination = dst
         if os.name == "nt":
             destination = toPosix(Path(dst))
@@ -1378,7 +1764,7 @@ class Regression:
             destination,
             "--metadata-receive",
         ]
-        r = self.tool.run(args, "receive_metadata")
+        r = self.tool.run(args, f"{tls_name}_receive_metadata_{v:03d}")
         result = "FAIL"
         metadata = {}
         if r is not None:
@@ -1386,11 +1772,11 @@ class Regression:
             output = r["stdout"]
             metadata = extract_split_received_metadata(output)
 
-        tc_name = "SPLIT-RESTORE-RECEIVE-METADATA"
+        tc_name = f"{tls_name}_SPLIT-RESTORE-RECEIVE-METADATA"
         desc = f"Split Restore Receive Metadata-{v:03d}"
 
         if isCBT:
-            tc_name = "CBT-RESTORE-RECEIVE-METADATA"
+            tc_name = f"{tls_name}_CBT-RESTORE-RECEIVE-METADATA"
             desc = f"CBT Restore Receive Metadata-{v:03d}"
 
         self.add(
@@ -1412,6 +1798,7 @@ class Regression:
         dst: str = "/",
         v: int = 1,
         isCBT: bool = False,
+        use_tls: bool = False,
     ):
         # Split-res
         # ./idevsutil --xml-output --add-progress --files-from=/home/opt/file.txt  --device-id=5c0bD017718384600007254654b5z --password-file=1234 --port=900 test1@localhost::home/ /home/IDdr/ --split-res
@@ -1434,14 +1821,17 @@ class Regression:
             destination,
             "--split-res",
         ]
-        r = self.tool.run(args, f"split_restore_{v:03d}")
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+        r = self.tool.run(args, f"{tls_name}_split_restore_{v:03d}")
         result = "FAIL"
         if r is not None:
             result = "PASS" if r["return_code"] == 0 else "FAIL"
 
-        tc_name = "SPLIT-RESTORE-SPLITS"
+        tc_name = f"{tls_name}_SPLIT-RESTORE-SPLITS"
         if isCBT:
-            tc_name = "CBT-RESTORE-SPLITS"
+            tc_name = f"{tls_name}_CBT-RESTORE-SPLITS"
 
         self.add(
             tc_name,
@@ -1456,7 +1846,12 @@ class Regression:
         return result == "PASS"
 
     def merge_splits(
-        self, target_file: str, split_count: int, v: int, isCBT: bool = False
+        self,
+        target_file: str,
+        split_count: int,
+        v: int,
+        isCBT: bool = False,
+        use_tls: bool = False,
     ):
         # Merge
         # ./idevsutil --password-file=1234 --port=900 --xml-output --pvt-key=1234 --device-id=5c0bD017718384600007254654b5z test1@localhost::home/
@@ -1475,15 +1870,19 @@ class Regression:
             f"--split-count={split_count}",
             self.tool.remote(),
         ]
-        r = self.tool.run(args, f"merge_splits_{v:03d}")
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+        r = self.tool.run(args, f"{tls_name}_merge_splits_{v:03d}")
         result = "FAIL"
         if r is not None:
             result = "PASS" if r["return_code"] == 0 else "FAIL"
 
         name = Path(target_file).name
-        tc_name = "SPLIT-MERGE-SPLITS"
+        tc_name = f"{tls_name}_SPLIT-MERGE-SPLITS"
         if isCBT:
-            tc_name = "CBT-MERGE-SPLITS"
+            tc_name = f"{tls_name}_CBT-MERGE-SPLITS"
+
         self.add(
             tc_name,
             f"Merge Splits-{name}:IBVER{v:03d}",
@@ -1502,21 +1901,26 @@ class Regression:
         v: int,
         split_count: int,
         isCBT: bool = False,
+        use_tls: bool = False,
     ):
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+
         src = self.split_source
         dst = self.split_restored / f"V{v:03d}"
         snapshot = self.split_snapshots
         filelist = self.split_lists
-        receive_meta_name = f"restore_{v:03d}_receive_metadata.txt"
-        split_restore_name = f"restore_{v:03d}_split_restore.txt"
+        receive_meta_name = f"{tls_name}_restore_{v:03d}_receive_metadata.txt"
+        split_restore_name = f"{tls_name}_restore_{v:03d}_split_restore.txt"
 
         if isCBT:
             src = self.cbt_source
             dst = self.cbt_restored / f"V{v:03d}"
             snapshot = self.cbt_snapshots
             filelist = self.cbt_lists
-            receive_meta_name = f"cbt_{v:03d}_receive_metadata.txt"
-            split_restore_name = f"cbt_{v:03d}_split_restore.txt"
+            receive_meta_name = f"{tls_name}_cbt_{v:03d}_receive_metadata.txt"
+            split_restore_name = f"{tls_name}_cbt_{v:03d}_split_restore.txt"
 
         fl: Path = filelist / receive_meta_name
 
@@ -1557,13 +1961,20 @@ class Regression:
         if not dst.exists():
             dst.mkdir(parents=True, exist_ok=True)
 
-        split_meta = self.split_receive_metadata(fl=fl, dst=str(dst), v=v, isCBT=isCBT)
+        split_meta = self.split_receive_metadata(
+            fl=fl, dst=str(dst), v=v, isCBT=isCBT, use_tls=use_tls
+        )
 
         # fl = self.split_lists / f"restore_{v:03d}_split_restore.txt"
         fl = filelist / split_restore_name
 
         self._split_restore(
-            split_meta=split_meta, fl=fl, dst=str(dst), v=v, isCBT=isCBT
+            split_meta=split_meta,
+            fl=fl,
+            dst=str(dst),
+            v=v,
+            isCBT=isCBT,
+            use_tls=use_tls,
         )
 
         for path, value in original_files.items():
@@ -1574,7 +1985,11 @@ class Regression:
             count = len(value["splits_info"])
 
             self.merge_splits(
-                target_file=str(abs_path), split_count=count, v=v, isCBT=isCBT
+                target_file=str(abs_path),
+                split_count=count,
+                v=v,
+                isCBT=isCBT,
+                use_tls=use_tls,
             )
 
         return self.validate_restore(
@@ -1584,18 +1999,22 @@ class Regression:
             isRegularFile=0,
             original_files_dict=original_files,
             isCBT=isCBT,
+            use_tls=use_tls,
         )
 
     def split_backup(
-        self, v: int, split_count: int, files: list[Path] = []
+        self, v: int, split_count: int, files: list[Path] = [], use_tls: bool = True
     ) -> dict[str, Any]:
         all_files: list[Path] = files
 
         if len(all_files) == 0:
             all_files = get_all_files_from_list(self.tool.env.fileListPath)
         origin_files_to_split: dict[str, Any] = {}
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
 
-        fl = self.split_lists / f"backup_{v:03d}_sync_check.txt"
+        fl = self.split_lists / f"{tls_name}_backup_{v:03d}_sync_check.txt"
 
         for i, file in enumerate(all_files):
             mode = "a" if i > 0 else "w"
@@ -1616,19 +2035,24 @@ class Regression:
                     mdt = f["mdt"]
                     self.add_file(name=name, checksum=checksum, size=size, mdt=mdt)
 
-        file_csv = self.split_source / f"split_info_{v:03d}.json"
+        file_csv = self.split_source / f"{tls_name}_split_info_{v:03d}.json"
         self.write_file_info(file_csv)
 
         session = self.sync_check(str(fl), v=v)
 
-        fl = self.split_lists / f"backup_{v:03d}_split_backup.txt"
+        fl = self.split_lists / f"{tls_name}_backup_{v:03d}_split_backup.txt"
+
         ordered_file_paths: list[Path] = []
         if session is not None:
             ordered_file_paths = self._split_backup(
-                session, origin_files_to_split=origin_files_to_split, fl=fl, v=v
+                session,
+                origin_files_to_split=origin_files_to_split,
+                fl=fl,
+                v=v,
+                use_tls=use_tls,
             )
 
-            fl = self.split_lists / f"backup_{v:03d}_send_meta.txt"
+            fl = self.split_lists / f"{tls_name}_backup_{v:03d}_send_meta.txt"
 
             self._send_split_metadata(
                 original_files_to_split=origin_files_to_split,
@@ -1636,6 +2060,7 @@ class Regression:
                 split_count=split_count,
                 fl=fl,
                 v=v,
+                use_tls=use_tls,
             )
             self._copy_snapshot(
                 v=v,
@@ -1648,7 +2073,9 @@ class Regression:
             "ordered_file_paths": ordered_file_paths,
         }
 
-    def validate_backup(self, isRegularFile: int = 1, module: str = "SPLIT"):
+    def validate_backup(
+        self, isRegularFile: int = 1, module: str = "SPLIT", use_tls: bool = True
+    ):
         print("-" * 90)
         if bool(isRegularFile):
             print("FULL & INC Backup Complete. Validating Results..")
@@ -1658,7 +2085,9 @@ class Regression:
 
         all_files = self.db.get_all(table="ibtable", isRegularFile=isRegularFile)
         dirs = {}
-
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
         for item in all_files:
             id = item["uid"]
             if id != "":
@@ -1673,12 +2102,14 @@ class Regression:
                     dirs[parent].append(name)
 
         for dir, children in dirs.items():
-            name = "auth_list" + str(dir).replace("/", "_")
+            name = f"{tls_name}_auth_list" + str(dir).replace("/", "_")
             r = self.tool.auth_list(
                 True, remotePath=dir, isRegularFile=isRegularFile, name=name
             )
             # r = self.tool.search(isSuiteRunning=True, filesOnly=True)
-            tc_name = "REGULAR-FILE-AUTH-LIST" if bool(isRegularFile) else module
+            tc_name = (
+                f"{tls_name}_REGULAR-FILE-AUTH-LIST" if bool(isRegularFile) else module
+            )
 
             if r["return_code"] != 0:
                 self.add(
