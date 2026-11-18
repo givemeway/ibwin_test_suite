@@ -30,6 +30,10 @@ from ..utils import (
     extract_repo_info,
 )
 
+TLS = "_tls"
+NO_TLS = "_no_tls"
+ENC = "_enc"
+
 
 class IdevsUtil:
     def __init__(
@@ -81,8 +85,8 @@ class IdevsUtil:
         return base + f"{path.lstrip('/')}" if path else base
 
     def convert_to_utf8_enc_cmd(
-        self, args: List[str], executable: str
-    ) -> List[str] | None:
+        self, args: list[str], executable: str
+    ) -> list[str] | None:
         if self.build.isTestBed == 1 and self.env.port:
             args.append(f"--port={self.env.port}")
 
@@ -93,7 +97,7 @@ class IdevsUtil:
         utf8FilePath = Path(self.build.working_dir).joinpath("args_1.txt")
         create_arg_file(args, argFilePath)
         utf_arg = []
-        enc_exe = Path(self.build.working_dir).joinpath(self.build.executable + "_enc")
+        enc_exe = Path(self.build.working_dir).joinpath(self.build.executable + ENC)
 
         utf_arg.append(str(enc_exe))
         utf_arg.append(str(argFilePath))
@@ -220,11 +224,18 @@ class IdevsUtil:
         args,
         name="command",
         isBuildSame: bool = True,
-    ) -> dict[str, str] | None:
-        cmd: List[str] | None = []
+        isMultiple_device_id: bool = False,
+    ) -> dict[str, int | str | bytes | float] | None:
+        cmd: list[str] | None = []
 
         if name != "sys_cmds":
             executable = self.build.working_dir + self.build.executable
+
+            if int(self.env.use_tls):
+                executable = self.build.working_dir + self.build.executable + TLS
+            else:
+                executable = self.build.working_dir + self.build.executable + NO_TLS
+
             # cmd = [self.build.executable] + args
             # cmd = [executable] + args
 
@@ -256,12 +267,13 @@ class IdevsUtil:
                 and int(self.env.dedup) == 1
                 and name != "create_bucket"
                 and not bool(self.env.syncDedup)
+                and not isMultiple_device_id
             ):
                 cmd.append(f"--device-id={self.env.device_id}")
 
-            if bool(self.env.use_tls):
-                cmd.append("--tls")
-                cmd.append("--tls-hostname=localhost")
+            # if bool(self.env.use_tls):
+            #     cmd.append("--tls")
+            #     cmd.append("--tls-hostname=localhost")
 
             print("\n" + "=" * 90)
             print(f"BUILD   : {self.build.name} / {self.build.release}")
@@ -272,7 +284,7 @@ class IdevsUtil:
                 cmd = self.convert_to_utf8_enc_cmd(args, executable)
 
             start = time.perf_counter()
-            if isinstance(cmd, List):
+            if isinstance(cmd, list):
                 try:
                     p = subprocess.run(
                         cmd,
@@ -293,6 +305,12 @@ class IdevsUtil:
                     rc, out, err = -1, "", str(e)
 
                 elapsed = time.perf_counter() - start
+                if isinstance(out, bytes):
+                    out = out.decode("utf-8", errors="replace")
+
+                if isinstance(err, bytes):
+                    err = err.decode("utf-8", errors="replace")
+
                 (self.logs / f"{name}.stdout.txt").write_text(
                     out, encoding="utf-8", errors="replace"
                 )
@@ -372,7 +390,7 @@ class IdevsUtil:
         self,
         fl: str = "",
         isSuiteRunning: bool = False,
-        itemsToDelete: List[str] = [],
+        itemsToDelete: list[str] = [],
         v: str = "",
     ):
         file_list = fl
@@ -441,6 +459,7 @@ class IdevsUtil:
         rp: Path = Path("/"),
         isRegularFile: int = 1,
         isCBT: bool = False,
+        use_tls: bool = True,
     ):
         remotePath: str
         if isRegression:
@@ -460,11 +479,14 @@ class IdevsUtil:
             a.append("--split-backup")
         a.append("--xml-output")
         a.append(self.remote(remotePath))
-        name = "regular_version_info"
+        tls_name = "tls"
+        if not use_tls:
+            tls_name = "no_tls"
+        name = f"{tls_name}_regular_version_info"
         if isCBT:
-            name = "cbt_version_info"
+            name = f"{tls_name}_cbt_version_info"
         if not bool(isRegularFile) and not isCBT:
-            name = "split_bkp_version_info"
+            name = f"{tls_name}_split_bkp_version_info"
         return self.run(a, name)
 
     def search(
@@ -561,6 +583,27 @@ class IdevsUtil:
                 or self.env.fileListPath
             )
         a = ["--moveto-original", "--xml-output"]
+        a.append(f"--files-from={fl}")
+        a.append(self.remote())
+        return self.run(a, name)
+
+    def delete_from_trash(
+        self,
+        isSuiteRunning: bool = False,
+        name: str = "delete_from_trash",
+        filelist: str = "",
+    ):
+        fl = filelist
+        if not isSuiteRunning:
+            fl = (
+                input(f"File List Path: [{self.env.fileListPath}]").strip()
+                or self.env.fileListPath
+            )
+        a = ["--xml-output"]
+        if self.env.device_id and int(self.env.dedup):
+            a.append("--empty-trash")
+        else:
+            a.append("--deletefrom-trash")
         a.append(f"--files-from={fl}")
         a.append(self.remote())
         return self.run(a, name)

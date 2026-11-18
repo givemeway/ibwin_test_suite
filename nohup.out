@@ -1,0 +1,46 @@
+=== Batch started at 2026-11-13 09:06:14 ===
+[09:06:14] Starting instance 1
+Traceback (most recent call last):
+  File "/home/sandeep/idevsutil_qa_package/batch_run.py", line 69, in main
+    for future in concurrent.futures.as_completed(futures):
+                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/usr/local/lib/python3.14/concurrent/futures/_base.py", line 237, in as_completed
+    waiter.event.wait(wait_timeout)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.14/threading.py", line 671, in wait
+    signaled = self._cond.wait(timeout)
+  File "/usr/local/lib/python3.14/threading.py", line 369, in wait
+    waiter.acquire()
+    ~~~~~~~~~~~~~~^^
+KeyboardInterrupt
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/sandeep/idevsutil_qa_package/batch_run.py", line 95, in <module>
+    main()
+    ~~~~^^
+  File "/home/sandeep/idevsutil_qa_package/batch_run.py", line 65, in main
+    with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_INSTANCES) as executor:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.14/concurrent/futures/_base.py", line 673, in __exit__
+    self.shutdown(wait=True)
+    ~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/usr/local/lib/python3.14/concurrent/futures/thread.py", line 273, in shutdown
+    t.join()
+    ~~~~~~^^
+  File "/usr/local/lib/python3.14/threading.py", line 1134, in join
+    self._os_thread_handle.join(timeout)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+KeyboardInterrupt
+Exception ignored on threading shutdown:
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.14/threading.py", line 1578, in _shutdown
+    atexit_call()
+  File "/usr/local/lib/python3.14/threading.py", line 1549, in <lambda>
+    _threading_atexits.append(lambda: func(*arg, **kwargs))
+  File "/usr/local/lib/python3.14/concurrent/futures/thread.py", line 31, in _python_exit
+    t.join()
+  File "/usr/local/lib/python3.14/threading.py", line 1134, in join
+    self._os_thread_handle.join(timeout)
+KeyboardInterrupt: 

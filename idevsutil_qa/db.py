@@ -433,6 +433,7 @@ class FileTreeDatabase:
         is_folder: int = 0,
         isRegularFile: int = 1,
         findAll: bool = False,
+        stmt: str = "",
     ) -> list[dict[str, Any]]:
         rows: list[sqlite3.Row] = []
         if isinstance(table, str):
@@ -448,7 +449,8 @@ class FileTreeDatabase:
                     )
                 else:
                     query = f"SELECT * FROM {table};"
-
+            if stmt != "":
+                query = stmt
             rows = self.conn.execute(query).fetchall()
 
         elif isinstance(table, list):
@@ -580,7 +582,6 @@ class FileTreeDatabase:
         parts = [part for part in path.strip("/").split("/") if part]
         if not parts:
             return None
-
         filters = ""
         extra: list[Any] = []
         if isRegularFile is not None:
@@ -1659,11 +1660,63 @@ class FileTreeDatabase:
             exists = self.conn.execute(
                 "SELECT 1 FROM ibtable WHERE uid = ?", (target_parent,)
             ).fetchone()
+            # if exists is None:
+            # raise ValueError(
+            #     f"Parent {target_parent!r} no longer exists in ibtable; "
+            #     "pass new_parent_id to choose another location."
+            # )
             if exists is None:
-                raise ValueError(
-                    f"Parent {target_parent!r} no longer exists in ibtable; "
-                    "pass new_parent_id to choose another location."
-                )
+                # check if it's sitting in trash
+                trashed_parent = self.conn.execute(
+                    "SELECT * FROM trash WHERE uid = ?", (target_parent,)
+                ).fetchone()
+
+                if trashed_parent is not None:
+                    # copy this parent folder from trash into ibtable
+                    p_parent = trashed_parent["parent_id_ibtable"]
+                    if p_parent is not None:
+                        p_exists = self.conn.execute(
+                            "SELECT 1 FROM ibtable WHERE uid = ?", (p_parent,)
+                        ).fetchone()
+                        if p_exists is None:
+                            p_parent = (
+                                None  # Fallback to root if grandparent is also missing
+                            )
+
+                    with self.conn:
+                        self.conn.execute(
+                            """
+                            INSERT OR IGNORE INTO ibtable (
+                                uid, parent_id, is_folder, name, mdt, save_time, label,
+                                size, vernum, checksum, backuptime, device_id, computer_id, isRegularFile
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                trashed_parent["uid"],
+                                p_parent,
+                                trashed_parent["is_folder"],
+                                trashed_parent["name"],
+                                trashed_parent["mdt"],
+                                trashed_parent["save_time"],
+                                trashed_parent["label"],
+                                trashed_parent["size"],
+                                trashed_parent["vernum"],
+                                trashed_parent["checksum"],
+                                trashed_parent["backuptime"],
+                                trashed_parent["device_id"],
+                                trashed_parent["computer_id"],
+                                trashed_parent["isRegularFile"],
+                            ),
+                        )
+                else:
+                    raise ValueError(
+                        f"Parent {target_parent!r} does not exist in ibtable or trash."
+                    )
+            # elif exists["is_folder"] == 0:
+            #     raise ValueError(
+            #         f"Target parent {target_parent!r} exists in ibtable but is a file, not a folder."
+            #     )
 
         subtree_cte = """
             WITH RECURSIVE subtree AS (
